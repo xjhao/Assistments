@@ -1,0 +1,322 @@
+class Tutor::FolderController < Tutor::DefaultController
+	#don't want to include FolderControllerMethods because it contains actions
+	#that students shouldn't have access to
+
+  layout 'tutor'
+  include FolderControllerMethods
+  #include FolderOptions
+  
+	helper FolderHelper
+	include FolderHelper  #need this for folder_structure
+  #include Tutor::ClassAssignmentHelper
+  # include Teacher::DataHelper
+  
+  before_filter :initialize_instance_variables, :except => [:index,:set_default_class, :folder_structure]
+
+  
+  def index
+    # reason for controlling default open here is
+    # we need to calculate progress for class_assignments
+    # here, in this controller, to display progress
+    # when they are default opened.
+    # 
+    # in other controller no such actions are required,
+    # so default_open can simply be a parameter to
+    # render_folder_manager.
+	
+    # mdailey edit
+    # I am assuming default open means open the base folder so it shows everything inside of it
+    # this does not translate into lets do horrible inefficiencies
+    # Also, I dont think this would work if we have more than FolderItemLoadSize items in the original folder
+    # edit - I have confirmed that currently it would only load the first FolderItemLoadSize
+    
+    # just set this to false if this is no longer required.
+    @default_open = true
+	
+	
+	#taken from the initialization function - Did not want the bounce being used...
+	@parameters = params[:parameters].nil? ? {} : Marshal.load(Base64.decode64(params[:parameters]))
+	student_class_id = params[:student_class_id] || @parameters[:student_class_id] || params[:id]
+	@student_class = StudentClass.find_by_id(student_class_id, :include => {:teachers => {:user => :user_detail}})
+	
+	if @student_class.nil?
+		@student_class = current_user.student.get_default_class({:include => {:teachers => {:user => :user_detail}}}, true)
+	end
+	
+	if @student_class.nil?
+		@new_student = true #marker to tell the UI to show the Enroll Student form
+		@disable_everything = true #everything should be disabled
+		return
+	end
+
+	#Check if its the default class
+	@default_class = Setting.get_enabled_setting_value(current_user.id, 'defaultClass', Scope::STUDENT) == @student_class.id.to_s
+	@disable_link = "class_#{@student_class.id}"
+    
+	#Taken from the initialization function
+    @owner_entity = @student_class 
+	
+	
+	####################################################################################################################### 
+	#####################################################  Classes  #######################################################
+	####################################################################################################################### 		
+	@student_classes = current_user.student.classes_to_show
+	
+	unless @student_classes.include?(@student_class) ##if its not a class to show then the student should not be accessing it.
+	  redirect_to(:controller => '/tutor')
+      return
+	end
+    unless current_user.student.enrolled_in_class?(@student_class.id)
+      #If the student is not enrolled then we need to disable everything
+	  @disable_everything = true
+	  return
+    end
+	
+	
+	#initialization and checks to see if enrolled have passed. Begin declaring variables.
+	
+	@folder_controller = 'tutor/folder'
+    base_folder = @student_class.assignment_folder
+	student_user_id = current_user.student['user_id']
+    @initial_assignment_folder_items, num_remaining, assignment_ids = base_folder.get_folder_items_fast 10, 0
+    #@arrs_folder_items, @common_folder_items = base_folder.get_two_folder_items FolderItemLoadSize*100, 0
+    if num_remaining <= 0
+      # This means that there are no more class assignments in here, so no more fetching
+      @assignment_folder_offset = @initial_assignment_folder_items.size
+    else
+      @assignment_folder_offset = @initial_assignment_folder_items.size
+    end
+    @aggregrate, @assignments = calculate_progresses_and_other_jazz(assignment_ids, @student_class) if @default_open
+
+    @assignment_folder_options = get_folder_options @student_class.assignment_folder
+    
+	@placements_enabled = @student_class.enable_placements?
+	@arrs_enabled = @student_class.enable_arrs?
+	@hide_student_item_report = @student_class.hide_student_item_report?
+	@bolded_folder_ids = unfinished_assignments_folders(base_folder, student_user_id)
+	if !@arrs_enabled and @hide_student_item_report
+		@disable_reports = true
+	end
+	
+	
+	
+	if @placements_enabled
+		####################################################################################################################### 
+		###############################################  PLACEments Reactions  ################################################
+		####################################################################################################################### 		
+		@reaction_assignments = ReactionAssignment.get_all_nondiscontinued_reactions(current_user.student.id, @student_class.id)
+	end
+    
+	if @arrs_enabled
+		####################################################################################################################### 
+		#################################################  ARRS Relearning  ###################################################
+		####################################################################################################################### 
+		@relearning_records = Tutor::ArrsTestController.get_relearning_records?(current_user.student.id, @student_class.id)
+		@doable_relearning_assignments = Tutor::ArrsTestController.get_doable_relearning_assignments?(current_user.id, @relearning_records)
+		#@relearning_assignments = ClassAssignment.find_all_by_id(@relearning_records.collect{|x| x.relearning_class_assignment_id})
+		
+		
+		####################################################################################################################### 
+		################################################  ARRS Reassessment  ##################################################
+		####################################################################################################################### 
+		@tests = Tutor::ArrsTestController.get_arrs_test?(current_user.id, current_user.student.id, @student_class.id)
+		
+		
+		####################################################################################################################### 
+		################################################  ARRS Strict Mode  ###################################################
+		####################################################################################################################### 
+		
+		@arrs_strict_mode = false
+		
+		strict_mode = Setting.get_enabled_setting_value(@student_class.id, "arrs_strict_mode", Scope::CLASS)
+		after_school_time = Setting.get_enabled_setting_value (@student_class.id, "arrs_after_school_time", Scope::CLASS)
+		if strict_mode == true and Time.now.to_time.hour >= after_school_time[0,2].to_i and Time.now.to_time.min >= after_school_time[3,5].to_i and (@tests.size != 0 or @doable_relearning_assignments.size != 0)
+			@arrs_strict_mode = true
+		end
+    end            
+  end
+  
+  #set the current student's default class
+  def set_default_class
+  
+	if !@student_class.nil?
+		student_class_id = @student_class.id
+    elsif !params[:id].nil?
+		student_class_id = params[:id]
+	else
+		return bounce("You need to include a student_class_id")
+	end
+	
+	unless current_user.student.enrolled_in_class?(student_class_id)
+      redirect_to(:controller => '/tutor')
+      return
+    end
+	
+	current_user.student.set_default_class(student_class_id)
+	
+	render :nothing => true, :content_type => 'text/html'
+  end
+
+  
+  #get_folder_items
+  # currently the only action required
+  def view_folder_contents
+    @folder_id = params[:folder_id]
+    begin
+      @folder = Folder.find @folder_id.to_i
+      @folder_options = FolderOptions.edit_disabled
+      @parameters = params[:parameters].nil? ? {} : Marshal.load(Base64.decode64(params[:parameters]))
+      @disable_edit = !@folder_options[:allow_edit]
+
+    
+      return bounce('That class does not exist') if @student_class.nil?
+      return bounce('You are not enrolled in that class') unless current_user.student.enrolled_in_class?(@student_class.id)
+	  
+	  base_folder = @student_class.assignment_folder
+	  student_user_id = current_user.student['user_id']
+	  @bolded_folder_ids = unfinished_assignments_folders(base_folder, student_user_id)
+	  
+      cascading_view_folder_contents @folder
+      #@pos = params[:pos].blank? ? 0 : params[:pos].to_i
+      #offset = @pos
+      #@no_more_items = true
+	  @folder_controller = 'tutor/folder'
+      #@folder_items, num_remaining, @assignment_ids = @folder.get_folder_items_fast FolderItemLoadSize, offset
+	  
+	  
+	  @hide_student_item_report = @student_class.hide_student_item_report?
+
+	  
+      #  @folder_items, @pos, @assignment_ids = @folder.get_folder_items_tutor FolderItemLoadSize, offset
+      @aggregrate, @assignments = calculate_progresses_and_other_jazz @assignment_ids, @student_class
+      # unless @assignments.nil? or @assignments.size == 0
+      #@assignments.reject!{|x| !x.release_date.nil? and x.release_date <= Time.now}
+      #  end
+	  
+    rescue ActiveRecord::RecordNotFound
+      flash[:warning] = "Folder has been deleted"
+    end
+    render :template => 'folder/view_contents', :type => :rjs, :layout => false
+	end	
+  
+  
+	# currently the only action required
+	def view_folder_contents_old
+    @folder_id = params[:folder_id]
+    begin
+      @folder = Folder.find @folder_id.to_i
+      @folder_options = FolderOptions.edit_disabled
+      cascading_view_folder_contents @folder
+
+      @parameters = params[:parameters].nil? ? {} : Marshal.load(Base64.decode64(params[:parameters]))
+      @disable_edit = !@folder_options[:allow_edit]
+    
+      student_class_id = session[:student_class_id] = params[:student_class_id]
+      @student_class = StudentClass.find_by_id(student_class_id)
+      return bounce('That class does not exist') if @student_class.nil?
+      return bounce('You are not enrolled in that class') unless current_user.student.enrolled_in_class?(student_class_id)
+
+      assignment_items = @folder_items.select{|fi| fi.item_type == ClassAssignment.to_s}
+      assignment_ids = assignment_items.collect{|fi| fi.item.id}
+	  
+	  
+	  
+      @aggregrate, @assignments = calculate_progresses_and_other_jazz assignment_ids, @student_class
+    rescue ActiveRecord::RecordNotFound
+      flash[:warning] = "Folder has been deleted"
+    end
+    render :template => 'folder/view_contents', :type => :rjs, :layout => false
+	end	
+  
+      
+  private
+  # expects an array of assignment_ids (NOT ASSIGNMENTS)
+  #
+  # did not refactor any of this code for calculating progress
+  # this is how twas done.
+  #
+  # just added whatever this method calculates to the 
+  # @parameters hash for folders so each class_assignment partial
+  # can easily access it.
+  #
+  # Moving this logic to a model is probably best like
+  # aggregate_progresses for teachers.
+  def calculate_progresses_and_other_jazz assignment_ids, student_class
+    @aggregate, @assignments = current_user.student.calculate_progresses_and_other_jazz assignment_ids, student_class
+  end
+  
+ 
+  # just setting the parameters for folders as an instance variable
+  def initialize_instance_variables
+    @parameters = params[:parameters].nil? ? {} : Marshal.load(Base64.decode64(params[:parameters]))
+	student_class_id = params[:student_class_id] || @parameters[:student_class_id]
+	return bounce('That class does not exist') if (@student_class = StudentClass.find_by_id(student_class_id)).nil?
+    @owner_entity = @student_class 
+  end
+  
+  # following a pattern
+  def get_folder_options folder
+    return FolderOptions.edit_disabled
+  end
+  
+    
+  def bounce(warning = nil)
+    set_flash(:warning, warning) unless warning.nil?
+    redirect_to(:controller => '/tutor')
+    nil
+  end
+  
+  # Find all the folders that has unfinished assignments in itself or its sub-folders
+  # The query utilizes CTE to implement two recursive selections, first search forward to get all unfinished assignments , 
+  # then track back to get all the folders 
+  def unfinished_assignments_folders(basefolder, student_user_id)
+	ua_folders_query = "with recursive unfinished_folders(id, parent_id, level) as(
+	select id, parent_id, 0 from folders 
+	where id in(
+	with recursive all_assignments(id, item_id, item_type, folder_id, level) as
+	(
+		select id, item_id, item_type, folder_id, 0 from folder_items 
+		where folder_id = #{basefolder.id.to_s}
+		union all
+		select FI.id, FI.item_id, FI.item_type, FI.folder_id, AA.level+1 from folder_items FI, all_assignments AA
+		where FI.folder_id = AA.item_id and AA.item_type = 'Folder'
+	)
+
+	select id from folders 
+	where id in
+	(
+		select folder_id from all_assignments 
+		where item_id not in
+		(
+			(select assignment_id from assignment_logs AL 
+			where user_id = #{student_user_id.to_s}
+			and AL.assignment_id in 
+			(
+				select item_id from all_assignments 
+				where item_type = 'ClassAssignment'
+			)
+			and end_time is not null)
+			union
+			(select id from class_assignments where curriculum_item_id = 1 and 
+			 id not in(select assignment_id from individual_assignments where user_id = #{student_user_id.to_s}))
+		) 
+		and item_type = 'ClassAssignment'
+	)
+	)
+	union all
+	select A.id, A.parent_id, B.level+1 from folders A, unfinished_folders B
+	where A.id = B.parent_id
+	)
+	select distinct on (id) id from unfinished_folders"
+	unfinished_folders = ActiveRecord::Base.connection.execute(ua_folders_query)
+	unfinished_folders_ids = []
+	len = unfinished_folders.result.length
+
+	for i in 0..len-1
+		unfinished_folders_ids.push(unfinished_folders.result[i][0])
+	end
+	return unfinished_folders_ids
+	end
+  
+end
+
