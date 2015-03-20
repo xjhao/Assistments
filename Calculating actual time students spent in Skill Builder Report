@@ -1,0 +1,3625 @@
+
+class Teacher::ReportController < Teacher::DefaultController
+  require 'variabilization'
+  require 'csv'
+  require 'rubygems'
+  #require 'gruff'
+
+  include ItemReport
+  include Teacher::ReportHelper
+  helper FolderHelper
+  include FolderHelper
+	helper ScrollTableHelper
+  include ReportCommentHelper
+  layout "report"
+  in_place_edit_for :self_explanation, :comment
+  
+  # DEFUNCT FUNCTION?
+  def mastery_completion_single_user
+	user_id = params[:user_id].to_i
+	@user = User.find(user_id)
+	
+	# :action => "mastery_completion_single_user", 
+	#		:user_id => '51933',
+	#		:include_relearning => params[:include_relearning],
+	#		:only_mastery 	=>	params[:only_mastery],
+	#		:teacher_id		=>	@teacher_id,
+	#		:student_class_id	=> @student_class_id,
+	#		:start_date		=> @my_start_date,
+	#		:end_date		=> @my_end_date		
+	@student_class_id = params[:student_class_id]
+	@student_class = StudentClass.find(@student_class_id)
+	unless params[:teacher_id].to_i == current_user.teacher.id
+		render :nothing => true
+		return
+	end
+	
+	start_date = params[:start_date]
+	end_date = params[:end_date]
+	
+	# lets get the assignments that are included
+	include_arrs = ""
+	only_master = " t3.type = 'MasterySection' and "
+	if !params[:only_mastery].nil? and params[:only_mastery] == "false"
+		only_master = " "
+		@all_assign = true
+	end
+	@my_q = "Select t1.*, t2.name as sequence_name, t3.name as section_name from class_assignments as t1
+	inner join sequences as t2 on t1.sequence_id = t2.id
+	inner join sections as t3 on t2.head_section_id = t3.id
+	where #{only_master} t1.student_class_id = #{@student_class_id} #{include_arrs}"
+	
+	@assignments = ClassAssignment.find_by_sql("Select t1.*, t2.name as sequence_name, t3.name as section_name from class_assignments as t1
+	inner join sequences as t2 on t1.sequence_id = t2.id
+	inner join sections as t3 on t2.head_section_id = t3.id
+	where #{only_master} t1.student_class_id = #{@student_class_id} #{include_arrs}")
+	assignment_ids = @assignments.collect{|x| x.id}
+	@assignments.sort!{|a,b| a.position <=> b.position }
+	
+	@my_results = Hash.new	# storing assignment_id -> everything
+	unless assignment_ids.length == 0
+		ActiveRecord::Base.connection.execute("SELECT assignment_id, 
+		CASE WHEN end_time <= '#{end_date}' and end_time >= '#{start_date}' THEN 'Yes' ELSE 'No' END as number_completed,
+		CASE WHEN start_time >= '#{start_date}' and start_time <='#{end_date}' THEN 'Yes' ELSE 'No' END as num_started, 
+		CASE WHEN start_time >= '#{start_date}' and end_time <= '#{end_date}' THEN 'Yes' ELSE 'No' END as num_start_and_complete
+		FROM assignment_logs
+		where assignment_id in (#{assignment_ids.join(",")})
+		and user_id = #{@user.id} ").result.each do |log|
+			assignment = log[0].to_i
+			@my_results[assignment] = log
+		end
+	end
+	
+	render :template=>'teacher/report/mastery_completion_single_user', :type=>:rjs, :layout =>false
+  end
+  
+  
+  def mastery_completion_report
+	@disable_link = "Assignment Completion by Date"
+    @teacher_id = current_user.teacher.id
+	@student_classes = StudentClass.find_by_sql("SELECT t1.*, t2.teacher_id
+		from student_classes as t1
+		left outer join teacher_classes as t2 on t1.id = t2.student_class_id 
+		WHERE (t1.enabled = true ) and t2.teacher_id = #{@teacher_id};")
+	@student_class_id = params[:id] || @student_classes.first.id
+	@student_class = StudentClass.find(@student_class_id)
+	@student_class_sections =  @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+	# check to make sure you have permission to view this report
+    unless @student_classes.collect{|x| x.id}.include?(@student_class.id)
+		set_flash :warning, "You can not view other teachers' class!"
+		redirect_to :controller => "folder",:action =>"index"
+		return
+    end
+    @student_class_section = StudentClassSection.find_by_id(params[:section_id]) unless params[:section_id].blank?
+	
+	# Get the students, which might be random 
+	if @student_class.anonymize_item_report?
+	
+	
+	
+        # if teacher wants to show report anonymously . The order of students should be random
+        @students = @student_class_section.nil? ? @student_class.get_students_randomly : @student_class_section.get_students_randomly
+        
+    else
+        @students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+    end
+	
+	# we want to get the time frame before we get the assignment_logs
+	unless params[:start].nil?
+		mt = params[:start]
+		start_date = "#{mt[:year]}-#{mt[:month]}-#{mt[:day]} #{mt[:hour]}:#{mt[:minute]}"
+	else
+		start_date = Time.now.yesterday
+		start_date = "#{start_date.year}-#{start_date.month}-#{start_date.day} #{start_date.hour}:#{start_date.min}"
+		end_date = Time.now
+		end_date = "#{end_date.year}-#{end_date.month}-#{end_date.day} #{end_date.hour}:#{end_date.min}"
+	end
+	unless params[:end].nil?
+		mt = params[:end]
+		end_date = "#{mt[:year]}-#{mt[:month]}-#{mt[:day]} #{mt[:hour]}:#{mt[:minute]}"
+	end
+	
+	
+	#@arrs_include = false
+	#@arrs_include = true if (!params[:include_relearning].nil? and params[:include_relearning] == "false")
+	#@all_assign = false
+	
+	include_arrs = ""
+	only_master = " t3.type = 'MasterySection' and "
+	if !params[:only_mastery].nil? and params[:only_mastery] == "false"
+		only_master = " "
+		@all_assign = true
+	end
+	
+	# lets get the assignment_logs
+	ati = ''
+  valid_assignment_type_ids = AssignmentType.find_all_by_origin("Teacher").collect{|x| x[:id]}.join(', ')
+  ati = "or assignment_type_id in (#{valid_assignment_type_ids})" unless valid_assignment_type_ids.empty?
+	@assignments = ClassAssignment.find_by_sql("Select t1.*, t2.name as sequence_name, t3.name as section_name from class_assignments as t1
+	inner join sequences as t2 on t1.sequence_id = t2.id
+	inner join sections as t3 on t2.head_section_id = t3.id
+	where #{only_master} t1.student_class_id = #{@student_class_id} #{include_arrs}
+	and (assignment_type_id is null #{ati})")
+	
+	@assignments.reject! {|ca| ca.arrs?}
+	assignment_ids = @assignments.collect{|x| x.id}
+	@assignments.sort!{|a,b| a.position <=> b.position }
+	
+	@my_results = Hash.new
+	unless assignment_ids.length == 0
+		ActiveRecord::Base.connection.execute("SELECT user_id, 
+SUM(CASE WHEN end_time <= '#{end_date}' and end_time >= '#{start_date}' THEN 1 ELSE 0 END) as number_completed,
+SUM(CASE WHEN start_time >= '#{start_date}' and start_time <='#{end_date}' THEN 1 ELSE 0 END) as num_started, 
+SUM(CASE WHEN start_time >= '#{start_date}' and end_time <= '#{end_date}' THEN 1 ELSE 0 END) as num_start_and_complete
+FROM assignment_logs
+where assignment_id in (#{assignment_ids.join(",")})
+group by user_id").result.each do |log|
+			user = log[0].to_i
+			@my_results[user] = log
+		end
+
+	end
+	
+	@my_start_date = start_date.to_s
+	@my_end_date = end_date.to_s
+	@start_time = start_date.to_time
+	@end_time = end_date.to_time
+	@diplay = true
+	if params[:doctype]=="excel"
+		send_data gen_excel_mastery_completion , :filename => "assignments_completion_#{@student_class.id}.csv", :type => "application/excel"
+	end
+  end
+  
+  # DEFUNCT FUNCTION?
+	# this is a report designed for assignments made on the quickbuilder when they have
+  # scaffolding on scaffolding which is used as an attempt count and we want to give
+  # them credit if they get the answer correct before the last scaffold.
+   def quickbuild_item_level
+    begin
+      load_stock_comments
+	  @is_book_homework = true
+   	  @teacher_id = current_user.teacher.id
+	  params[:id] = params[:id].to_i unless params[:id].nil?
+	  add_class = ''
+	  add_class = " or t1.id = #{params[:id].to_s}" unless params[:id].nil?
+	  @student_classes = StudentClass.find_by_sql("SELECT t1.*, t2.teacher_id
+		from student_classes as t1
+		left outer join teacher_classes as t2 on t1.id = t2.student_class_id 
+		WHERE (t1.enabled = true  #{add_class}) and t2.teacher_id = #{@teacher_id};")
+	  @student_classes.sort!{|x,y| x.name <=> y.name}
+	 
+	  @student_class = StudentClass.find_by_id(params[:id])
+	  if @student_class.nil?
+		@student_class = @student_classes.first
+		params[:id] = @student_class.id
+	  end
+	  @student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+      @student_class_section = StudentClassSection.find_by_id(params[:section_id]) unless params[:section_id].blank?
+	  unless params[:section_id].nil?
+		params[:section_id] = params[:section_id].to_i
+		params[:section_id] = nil if params[:section_id] == 0
+	  end
+	  unless params[:other_teacher_id].nil?
+		params[:other_teacher_id] = params[:other_teacher_id].to_i
+		params[:other_teacher_id] = nil if params[:other_teacher_id] == 0
+	  end
+	  params[:assignment_id] = params[:assignment_id].to_i unless params[:assignment_id].nil?
+	  
+	  # redirect prior to doing any actual work if the user does not have permission to view class
+	  unless @student_classes.include? @student_class
+		unless StudentClass.find_by_sql("SELECT t1.*
+			from student_classes as t1
+			left outer join teacher_classes as t2 on t1.id = t2.student_class_id 
+			WHERE t1.enabled = false  and t2.teacher_id = #{@teacher_id};").include? @student_class
+			set_flash :warning, "You can not view other teachers' class!"
+			redirect_to :controller => "folder",:action =>"index"
+			return
+		end
+	  end
+
+	  # this is much faster at loading the problem set name, 31ms instead of 250ms
+	  # we exclude relearning (spiraling assignments)
+	  @class_assignments = ClassAssignment.find_by_sql(
+		"select t1.*, t2.name as sequence_name, t3.name as section_name		
+		from class_assignments as t1 	
+		inner join sequences as t2 on t1.sequence_id = t2.id		
+		inner join sections as t3 on t2.head_section_id = t3.id	
+		where student_class_id = #{params[:id]} 
+		and t1.spiral_assignment_id is null 	order by position"
+	  )
+	  
+	  @class_assignments.reject! {|ca| ca.arrs?}
+	  
+	  # we attempt to load the assignment that the user wants, but if they do not have that assigment
+	  # then we load the one with the maximum value. La
+	  @class_assignment_id = params[:assignment_id] 
+	  @class_assignment = ClassAssignment.find_by_id(@class_assignment_id) unless @class_assignment_id.nil?
+	  if @class_assignment.nil? 
+		@class_assignment = ClassAssignment.find_by_sql(
+				"select * from class_assignments where id= (
+				SELECT max(id) FROM class_assignments WHERE (class_assignments.student_class_id = #{params[:id]}))"
+				).first
+		@class_assignment_id = @class_assignment.id unless @class_assignment.nil?
+	  elsif @class_assignment.student_class_id != @student_class.id	
+	    # we have an id from another class, first try finding a matching sequence
+		begin
+			#when user switches the classes, finding the class asignment with same sequence
+			seq_id = ClassAssignment.find(@class_assignment_id).sequence_id
+			class_assignment = @class_assignments.find{|assignment| assignment.sequence_id == seq_id }
+			@class_assignment_id = (class_assignment.nil? ? ClassAssignment.find_by_sql(
+				"select * from class_assignments where id= (
+				SELECT max(id) FROM class_assignments WHERE (class_assignments.student_class_id = #{params[:id]}))"
+				).first.id : class_assignment.id).to_i
+			@class_assignment = ClassAssignment.find_by_id(@class_assignment_id)
+			rescue ActiveRecord::RecordNotFound
+			  set_flash :warning, "This class assignment doesn't exist."
+			  redirect_to :controller => "folder",:action =>"index"
+			  return
+		end
+	  end
+	
+	  # redirect if we do not have any such class assignment
+	  if(@class_assignment_id.nil?)
+		set_flash :warning, "You do not have any assignments to view."
+        redirect_to :controller => "folder",:action =>"index"  
+		return
+	  end
+	  
+      @redirect = params[:redirect].nil? ? true:false
+	  
+	  # now get the list of users, the random sorting is currently done by their student_id
+	  # which should be random
+	  if @student_class.anonymize_item_report?
+          # if teacher wants to show report anonymously . The order of students should be random
+          @students = @student_class_section.nil? ? @student_class.get_students_randomly : @student_class_section.get_students_randomly
+      else
+          @students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+      end
+	  list_problems = nil
+	  list_users_problems = ""
+	  list_users_hints = ""
+	  include_section = ""
+	  if @student_class.filter_students_by_other_teachers_classes?
+		@all_teachers = User.getTeachersByClass( current_user.teacher.id, params[:id], params[:section_id])
+		  unless params[:other_teacher_id].nil?
+			
+			@teacher_new = UserRole.find_by_id(params[:other_teacher_id]) unless params[:other_teacher_id].blank?
+			unless @teacher_new.nil?
+				# we get a list of all the different teachers that this teacher teaches includes oneself
+				
+				include_section = "and t1.student_class_section_id = " + params[:section_id].to_s  unless params[:section_id].blank?
+				# want to hit student_classes to make sure that it is enabled
+				list_users = User.find_by_sql(
+					"select array_to_string(array_accum(distinct t3.user_id),',') as list_people
+					from enrollments as t1 
+					left outer join teacher_classes as t2 using (student_class_id)
+					left outer join user_roles as t3 on t1.student_id = t3.id
+					where t2.teacher_id = #{params[:other_teacher_id]} 
+					and t1.student_id in (select distinct student_id from enrollments where student_class_id = #{params[:id]} #{include_section})").first.list_people
+				list_users_problems = "and l.user_id in (" + list_users +")" unless list_users.nil? or list_users.length == 0
+				list_users_hints = "and problem_logs.user_id in (" +list_users +")" unless list_users.nil? or list_users.length == 0
+				# reject users who are not also in this other teacher class
+				my_users = list_users.split(/,/)
+				@students.delete_if {|a_student| not my_users.include?(a_student.user_id.to_s)}
+			end
+		  end
+	  end
+	  
+	  # This is for individual assignments
+	  @students = remove_not_assigned_users(@class_assignment, @students)
+	  @user_ids = @students.collect{|student| student.user_id}
+
+      #Added for due date purposes
+      assignment_logs = AssignmentLog.find_by_sql(
+		"select user_id, start_time,end_time, last_worked_on 
+		from assignment_logs 
+		where assignment_id = #{@class_assignment_id}"
+	  )	  	  #AssignmentLog.find(:all, :conditions => {:assignment_id => @class_assignment_id, :assignment_type => 'ClassAssignment'})
+      @assignment_logs = Hash.new
+      assignment_logs.each {|log| @assignment_logs[log.user_id] = log}
+	  @is_parent_notification = @student_class.enable_parent_notification?
+	  
+	  # now we get ready for the getting of the datawhen 
+      @problems = Array.new
+	  @main_problems = Hash.new	# we need to say to what main problem each one of the problems goes to 
+      @assistments = Hash.new
+      @matrix = Hash.new	# store by user,problem_id
+	  @problem_types = Hash.new		# know what type of problem each one is (open_response?)
+      @student_average = Hash.new	# includes total did, total correct, how many ungraded open responses
+      @problem_average = Hash.new
+      @total_hint = Hash.new(0)
+      @bottom_hint = Hash.new
+      @problem_positions = Hash.new
+      @help_requested = Hash.new(0)
+	  @common_wrong_answers = Hash.new
+	  @total_correct = 0	# for the overall average
+	  @total_did = 0
+	  
+	  # get the problem_logs  and we can get the assistment_type id later and hash those
+	  hints_usage = ProblemLog.find_by_sql(
+		  "select user_id,  problem_id, original, hint_count, bottom_hint from problem_logs 
+where assignment_id= #{@class_assignment_id} and problem_logs.assignment_type = 'ClassAssignment'"   + 
+			list_users_hints + " and hint_count > 0;"
+	  )
+	
+	   # A hash from assistments to their first problems
+	  assistments_to_first_problem = Hash.new(0)
+	  ActiveRecord::Base.connection.execute(
+	  "select id, assistment_id, position from problems where id in 
+		(select distinct problem_id from problem_logs where assignment_id = #{@class_assignment_id} and original = 1) 	  
+	  ").each do |problem_id, assistment_id, position|
+		assistments_to_first_problem[assistment_id.to_i] = problem_id.to_i if assistments_to_first_problem[assistment_id.to_i] == 0
+		assistments_to_first_problem[assistment_id.to_i] = problem_id.to_i if position.to_i == 1 
+	  end
+	  
+	  # get the ones to exclude
+	  problems_to_not_count = Array.new
+	  ActiveRecord::Base.connection.execute(
+	  "select t1.id from
+	  (select id from problems where id in 
+		(select distinct problem_id from problem_logs where assignment_id = #{@class_assignment_id} and original = 0) and problem_type_id = 1) as t1
+		inner join answers as t2 on t1.id = t2.problem_id
+		group by t1.id having count(*) = 1").result.each do  |a| 
+		problems_to_not_count.push(a[0].to_i)
+	  end	
+	  problems_to_not_count.push(-1) if problems_to_not_count.size == 0
+	  
+	  problem_logs = ProblemLog.find_by_sql(
+          "select l.*, a.value " +
+		  "from problem_logs l " +
+		  "left outer join answers a " +
+		  "on l.answer_id=a.id " +
+		  "where l.assignment_id=#{@class_assignment_id} and l.assignment_type = 'ClassAssignment'  " + list_users_problems+ "and l.problem_id not in (#{problems_to_not_count.join(',')})" +
+		  "order by l.id")
+
+	  problem_logs.each do |log|
+		next if not @user_ids.include? log.user_id
+		@matrix[log.user_id] = Hash.new if @matrix[log.user_id].nil?
+		@student_average[log.user_id] = Hash.new(0) if @student_average[log.user_id].nil?
+		if log.original == 1
+			@matrix[log.user_id][log.problem_id]=log
+			@student_average[log.user_id]["total_done"] += 1 unless log.end_time.nil? or log.correct.nil?
+			@student_average[log.user_id]["total_correct"] += log.correct unless log.end_time.nil? or log.correct.nil?
+			@student_average[log.user_id]["ungraded_essay"] += 1 if log.correct.nil? and !log.answer_text.nil?
+			if @problem_average[log.problem_id].nil?
+				@problem_average[log.problem_id] = Hash.new
+				@problem_average[log.problem_id]["total_done"] = 0
+				@problem_average[log.problem_id]["total_correct"] = 0
+			end 
+			@problem_average[log.problem_id]["total_done"] += 1 unless log.correct.nil?
+			@problem_average[log.problem_id]["total_correct"] += log.correct.to_f unless log.correct.nil?
+			@problems << log.problem_id
+			@total_did++
+			@assistments[log.problem_id] = log.assistment_id
+			@assignment_id = log.assignment_id
+			@total_correct += log.correct unless log.correct.nil?
+			@help_requested[log.problem_id]+=1 if log.first_action == 1 or log.first_action == 2
+		elsif log.original == 0
+			unless log.correct.nil? or log.correct.to_i == 0
+				unless @matrix[log.user_id][assistments_to_first_problem[log.assistment_id]].nil?
+					@matrix[log.user_id][assistments_to_first_problem[log.assistment_id]].correct = 2 if log.correct.to_i == 1 
+					@student_average[log.user_id]["total_correct"] += log.correct
+					@problem_average[assistments_to_first_problem[log.assistment_id]]["total_correct"] += log.correct
+					@total_correct += log.correct
+				end
+			end
+		end
+		# we have that we can access something using @matrix[user_id][problem_id]
+	  end
+	  
+	  # for graph
+	  unless @class_assignment.nil?
+		@assignment_name = @class_assignment.name
+	  end
+	  
+	  # we get the assistments so we can get their names
+	  # and we also get a list of unique problems
+	  @ass = Assistment.find(@assistments.values)
+	  @problems.uniq!
+	  # get the list of problems we are interested in
+	  list_problems =  @problems.join(",") 
+	  list_problems = "-1" if list_problems.nil? or list_problems.length == 0
+	  @assistment_sizes = Hash.new(1)
+
+	  
+	  # this is for graphing
+	  @problem_name = Array.new
+	  @assistment_id_var = Array.new
+	  @problem_average_var = Array.new
+	  # this is matts code at making this whole thing faster
+	  # this creates a hash of the type each problem is, so we only have to do it once
+	  p_types = Problem.find(@problems)
+	  p_types = Assistment.find_by_sql(
+		"Select t1.*, t2.problem_type_id,t2.id as problem_id
+		from assistments as t1
+		left outer join problems as t2 on t1.id = t2.assistment_id 
+		WHERE t2.id in (#{list_problems}) order by t2.id"
+	  )
+	  p_types.each do |problem|
+		@problem_types[problem.problem_id.to_i] = problem.problem_type_id.to_i
+		@problem_name << problem.id.to_s
+		@assistment_id_var << problem.id
+		avg = get_problem_average problem.problem_id.to_i
+		avg = 0 if avg.nil? or avg == ""
+		@problem_average_var << avg
+		@problem_average[problem.problem_id.to_i] = Hash.new(0) if @problem_average[problem.problem_id.to_i].nil?
+		@problem_average[problem.problem_id.to_i]["Average"] = avg.to_i
+	  end
+	  
+	  # we are going to want to know the essay scoring credentials
+	  @full_score_essay = @student_class.get_full_mark_setting.to_i || 4
+	  @open_response = ProblemType.find_by_sql("Select * from problem_types where name = 'open_response' limit 1").first.id
+	  @open_response = -1 if @open_response.nil?
+
+	  
+	  # we need to know how many times when to bottom out hints on each main problem
+	  # to do this we need to know what scaffold_ids map to which main problems
+	  tutor_hash = Hash.new
+	  TutorStrategy.find_by_sql(
+		"select t1.*, t3.id as scaffold_problem_id from tutor_strategies as t1
+inner join scaffolds as t2 on t2.tutor_strategy_id = t1.id
+left outer join problems as t3 on t2.id = t3.scaffold_id
+where t1.problem_id in (#{list_problems}) and t1.content_type = 'Scaffold'"
+	  ).each do |tutor_strategy|
+		tutor_hash[tutor_strategy.scaffold_problem_id.to_i] = tutor_strategy.problem_id
+	  end
+	  
+	  #this is how it calculates how many bottom out hints a user does on scaffolding questions
+	  # it goes through and counts for each strategy.
+	  # this would not be needed if we either selected all from problem_logs and then filtered or did a 
+	  # count from problem logs by assistment_id, user_id and summed the number of bottom out hints
+	  hints_usage.each do |l|
+	   	next if not @user_ids.include? l.user_id
+		@total_hint[l.user_id] += l.hint_count 
+		@bottom_hint[l.user_id] = Hash.new(0) if @bottom_hint[l.user_id].nil?
+		# now we really want to know how many times they went to a bottom hint if they went into any scaffolding
+		# as well so we can just use our new tutorial_strategy hash
+		if l.original == 1
+			@bottom_hint[l.user_id][l.problem_id] += l.bottom_hint
+		else
+			real_problem = tutor_hash[l.problem_id]
+			@bottom_hint[l.user_id][real_problem] += l.bottom_hint unless real_problem.nil? 
+		end	
+	  end
+	  
+	  #build common wrong answers
+	  wrong_answers_logs = ActiveRecord::Base.connection.execute(<<-EOS
+		select goo.assistment_id,goo.answer_text,goo.value,goo.percent from
+		(select foo.assistment_id,foo.count,answer_text,value,wrong_per_problem.count as count1,foo.count*1.0/wrong_per_problem.count*1.0 as percent from 
+		(
+		select count(*) as count,answer_text,answer_id, problem_logs.assistment_id
+		from problem_logs
+		left outer join problems on problem_logs.problem_id = problems.id
+		where correct=0 and first_action=0 and problem_logs.assignment_id= #{@class_assignment_id} and problem_logs.assignment_type = 'ClassAssignment'
+		group by answer_text, answer_id, problem_logs.assistment_id
+		having count(*)> 3
+		order by count desc)  as foo
+		left outer join  answers on foo.answer_id = answers.id
+		left outer join
+		(select count(*) as count,assistment_id
+		from problem_logs
+		where correct=0 and first_action=0 and problem_logs.assignment_id= #{@class_assignment_id} and problem_logs.assignment_type = 'ClassAssignment'
+		group by assistment_id
+		order by count desc) as wrong_per_problem using(assistment_id)
+		order by assistment_id, foo.count desc)
+		as goo
+		where goo.percent >= 0.1
+		EOS
+	  ).result
+	  @common_wrong_answers = Hash.new
+	  wrong_answers_logs.each do |log|
+		@common_wrong_answers[assistments_to_first_problem[log[0].to_i]] = Array.new if @common_wrong_answers[assistments_to_first_problem[log[0].to_i]].nil?
+		@common_wrong_answers[assistments_to_first_problem[log[0].to_i]] << log.slice(1..3)
+	  end
+	
+
+	  #only show public transfer models and his own transfer_models
+	  @transfer_models = Domain.find(:all, :joins => "left outer join transfer_model_ownerships on transfer_models.id = transfer_model_ownerships.domain_id", :include => [{:subject, :framework}, :model_inferred_from], :conditions => "transfer_models.is_public is true or content_creator_id = #{current_user.content_creator.id}")
+	  if params[:domain_id].nil?
+		#need to change to filter by grade
+		@domain_id = @transfer_models.first.id
+	  else
+		@domain_id = params[:domain_id].to_i
+	  end
+	  
+	  @transfer_model = Domain.find(@domain_id)
+	  
+	  @welldone = params[:welldone]||100
+	  @hard = params[:hard]||0
+	  @least_met_times = params[:least_met_times]||10
+	  @least_tagged_times = params[:least_tagged_times]||2
+	
+	  # this is skill stuff, and it basically builds an n layer query by doing until infer_model.nil?
+	  # but it seems to be fast enough for now, but need to test it on a certain one
+	  @all = true if params[:class]=="all"
+	  infer_model = @transfer_model.model_inferred_from
+	  joins = ""
+	  i = 1
+	  group_by = "s0.code, s0.name, s0.id "
+	  select = "s0.code, s0.name as name0, s0.id as id0,sum(problem_logs.correct) as skill_correct,count(problem_logs) as skill_done, count(distinct problem_logs.problem_id) as number_with_skill, array_to_string(array_accum(distinct problem_logs.problem_id),'a') as list_problems"
+	  until infer_model.nil?
+		joins += "left outer join skill_to_skill_mappings as stsm#{i} on stsm#{i}.skill_id1 = s#{i-1}.id left outer join skills as     s#{i} on s#{i}.id = stsm#{i}.skill_id2 "
+		group_by.insert(0, "s#{i}.name, s#{i}.id,")
+		select.insert(0,"s#{i}.code, s#{i}.name as name#{i},s#{i}.id as id#{i}, ")
+		i += 1
+		infer_model = infer_model.model_inferred_from
+	  end
+	  
+	  # I believe we are going to want something like 
+	  # select distinct on (user_id, problem_id, s#{i-1}.skill_id) #{select} from problem_logs...
+	  # because it is probably double counting these problems. Another idea is to just find which 
+	  # problems map to which skills for a given transfer model, and count up the number right and number
+	  # answered for each of those.
+	  @records = ProblemLog.find_by_sql([
+		  "select #{select} from problem_logs "+
+			"left outer join problem_to_skill_associations on problem_logs.problem_id = problem_to_skill_associations.problem_id "+
+			"left outer join skills as s0 on problem_to_skill_associations.skill_id = s0.id "+
+			"#{joins} "+
+			"where assignment_id=? and s#{i-1}.domain_id = ?  and problem_logs.correct is not null and problem_logs.assignment_type = 'ClassAssignment'
+			and problem_logs.problem_id in (#{list_problems})"+
+			"group by #{group_by}",@class_assignment_id,@domain_id
+		])
+	  # store the results of the query to a hash 	
+	  skill_rate = Hash.new
+	  @records.each do|record|
+		skill = [record["name#{i-1}"],record["id#{i-1}"]]
+		skill_rate[skill] = Hash.new if skill_rate[skill].nil?
+		skill_rate[skill]["problems"] = Array.new if  skill_rate[skill]["problems"].nil?
+		record.list_problems.to_s.split(/a/).each do|a_problem|
+			skill_rate[skill]["problems"] << a_problem.to_i
+		end
+
+		skill_rate[skill]["skills"] = Array.new if skill_rate[skill]["skills"].nil?
+		skill_rate[skill]["skills"] << record.name0
+		skill_rate[skill]["correct"] = 0 if skill_rate[skill]["correct"].nil?
+		skill_rate[skill]["correct"] += record.skill_correct.to_f
+		skill_rate[skill]["done"] = 0 if skill_rate[skill]["done"].nil?
+		skill_rate[skill]["done"] += record.skill_done.to_i
+		skill_rate[skill]["numProblems"] = record.number_with_skill.to_i
+	  end
+
+	  # find all the problems where the total done is greater than 0
+	  # problems is an array of the ids of problems
+	  sorted_by_average_problems = @problems.find_all{|p| @problem_average[p]["total_done"]>0}.sort{|a,b| (@problem_average[b]["total_correct"].to_f / @problem_average[b]["total_done"]).to_i <=>(@problem_average[a]["total_correct"].to_f  / @problem_average[a]["total_done"]).to_i}
+			  
+	  skill_rate.delete_if{|key,value| value["done"] < @least_met_times.to_i}
+	  @skill_rates = skill_rate.sort{|a,b| b[1]["numProblems"].to_i <=> a[1]["numProblems"].to_i}
+	  
+	  
+	  
+	  if params[:doctype]=="excel"
+		send_data gen_excel_item_level , :filename => "quickbuild_item_level_report.csv", :type => "application/excel"
+	  end
+	  if params[:doctype]=="excelwithtimes"
+		send_data gen_excel_item_level_with_times , :filename => "quickbuild_item_level_report_with_times.csv", :type => "application/excel"
+	  end
+		
+	# for graphing	
+	@student_average_var = Array.new
+	@student_name_var = Array.new
+	@students.each do |student|
+		name = student.last_name + ", " + student.first_name
+		@student_name_var << name
+		#   @student_avg = get_student_average @student
+		student_avg = get_student_average(student)
+
+		if student_avg == "" 
+			student_avg = 0
+		else
+			len = student_avg.length
+			student_avg.slice!(len-1)
+		end
+		@student_average_var << student_avg.to_i
+	end
+ 
+  # For data driven reports
+  (params[:include_not_started_users] || false)
+  @logging_options = { 
+	:assignment_id 		=> @class_assignment.id,
+	:student_class_id	=> @student_class.id,
+	:student_class_section_id	=> params[:section_id],
+	:other_teacher_id	=> params[:other_teacher_id]
+  }
+  end
+end
+
+  def item_level
+    # This is the end of the line for the walkthrough
+    WalkthroughManager.disable_walkthrough_for(current_user)
+	
+    if params[:auto_update].nil?
+       @auto_refresh = !params[:auto_update_from_function].nil? ? params[:auto_update_from_function] : "false"
+    else
+       @auto_refresh = params[:auto_update]
+    end
+	@hide_correct_row = params[:hide_correct_row]
+
+    ds = Setting.get_default_value("item_report_refresh_time")
+    @auto_update_time = ds.to_i * 60 # Convert to seconds
+    generate_item_report(params)
+	
+	@disable_link = "item_level_#{params[:assignment_id]}"
+	
+    get_number_of_days_worked_and_problems_seen(@user_ids, @class_assignment.id) unless @class_assignment.nil?
+    #do not reload the html and js files if the report is being downloaded.
+    if not(params[:doctype] == "excelwithtimes") and not(params[:doctype] == "excel")
+      unless @redirect
+        respond_to do |format|
+            format.html
+            format.js
+        end
+      end
+    end
+  end
+	
+	# DEFUNCT FUNCTION?
+  def section_level
+    # a student class has many student_class_sections which the students are actually enrolled in
+    # a teacher may have many different student classes
+    @student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}
+    @student_classes.reject! {|student_class| student_class.disabled?}# unless @student_class.disabled?
+    teacher_id = current_user.teacher.id
+	
+    if params[:id].nil?
+      # set the current student class which we will show
+      unless @student_classes.nil?
+        @student_class = StudentClass.find_by_id(@student_classes.first.id)
+      else
+        # Throw an error, you have no student classes
+        set_flash :warning, "You do not have any classes to view!"
+        redirect_to :controller => "folder",:action =>"index"
+      end
+    else
+      # get the user specified student class
+      @student_class = StudentClass.find_by_id(params[:id])
+      unless  @student_classes.include? @student_class
+        set_flash :warning, "You can not view other teachers' class!"
+        redirect_to :controller => "folder",:action =>"index"
+      end
+   	end
+		
+    # for the current class, get all of the sections
+    @student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+    @student_class_section = StudentClassSection.find(params[:section_id]) unless params[:section_id].blank?
+
+  	# get the different student_class__section_ids which all belong to the same class
+    unless @student_class_section.nil?
+      @student_class_section_ids = ''+@student_class_section.id.to_s
+      users_of_section = " and student_class_section_id = #{@student_class_section.id}"
+    else
+      users_of_section = ""
+      @student_class_section_ids = '-1'
+    end
+	
+
+    # get the assignments of this teacher, for the current class
+    @class_assignments = ClassAssignment.find_by_sql("select t1.*, t3.name as assignment_name from class_assignments t1, sequences t2, sections t3
+WHERE student_class_id = #{@student_class.id} AND t1.sequence_id = t2.id AND t2.head_section_id = t3.id order by t1.position ASC")
+
+    # The current assignment for this teacher
+    unless params[:assignment_id].nil?
+      @class_assignment_id = params[:assignment_id]
+    else
+      @class_assignment_id = @class_assignments.first.id
+    end
+	
+    @sequence_id = ClassAssignment.find_by_id(@class_assignment_id).sequence_id
+   
+
+    @section_names = Section.find_by_sql("select t2.parent_id as parent_section_id, t3.type,
+CASE WHEN t3.name IS NULL THEN 'nameless' ELSE t3.name END as section_name, count(*) as number_of_assistments_in_section 
+from sections as t1
+inner join section_links as t2 on t1.id = t2.child_id
+inner join sections as t3 on t2.parent_id = t3.id
+WHERE t1.type ~'^ProblemSection' and t1.sequence_id = #{@sequence_id} group by t2.parent_id, t3.type, t3.name")
+
+    @number_of_sections = @section_names.size
+	
+    @rows = Section.find_by_sql("select *,cast(average_value_of_correct as numeric(16,2)) as average_correct_value from
+(select * from
+(select distinct on (user_id) user_id, (first_name || ' ' || last_name) as the_name  from user_roles  as t1
+left outer join user_details as t2 using (user_id)
+ WHERE t1.id in (select student_id from enrollments where student_class_id = #{@student_class.id}) and t1.type ~'^Student') as t1 
+cross join 
+(select t2.parent_id as parent_section_id, t3.type as type_of_section, count(*) as number_assistments_in_section from sections as t1 
+inner join section_links as t2 on t1.id = t2.child_id 
+inner join sections as t3 on t2.parent_id = t3.id
+WHERE t1.type ~'^ProblemSection' and t1.sequence_id = #{@sequence_id}  group by parent_id, t3.type) as t2) as t10
+left outer join 
+(select parent_section_id, user_id, count(*) as number_problems_completed, 
+sum(CASE WHEN correct > 0 THEN 1 ELSE 0 END) as num_correct,
+sum(CASE WHEN correct = 0 THEN 1 ELSE 0 END) as num_wrong,
+avg(correct) as average_value_of_correct
+FROM
+(select distinct on (t5.user_id, t5.assistment_id) t4.*, t5.user_id, t5.correct from
+(select t2.parent_id as parent_section_id, cast(substring(t1.parameters from '%AssistmentID: #\"[0-9]+#\"%' for '#') as numeric) as assistment_id from sections as t1 
+inner join section_links as t2 on t1.id = t2.child_id 
+inner join sections as t3 on t2.parent_id = t3.id
+WHERE t1.type ~'^ProblemSection' and t1.sequence_id = #{@sequence_id}) as t4
+left outer join problem_logs as t5 on t4.assistment_id = t5.assistment_id
+WHERE t5.original=1 and t5.assignment_id = #{@class_assignment_id} and t5.correct is not null ) as t7 group by parent_section_id, user_id) as t11 using (user_id,parent_section_id) order by user_id, parent_section_id")
+  end
+  
+  # DEFUNCT FUNCTION?
+  def section_item_level
+    begin
+      load_stock_comments
+      @student_class = StudentClass.find(params[:id], :include => :students)
+      @student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+      @student_class_section = StudentClassSection.find(params[:section_id]) unless params[:section_id].blank?
+      @student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}
+      unless @student_classes.include? @student_class
+        set_flash :warning, "You can not view other teachers' class!"
+        redirect_to :controller => "folder",:action =>"index"
+      else
+        @student_classes.reject! {|student_class| student_class.disabled?} unless @student_class.disabled?
+        if @student_class.anonymize_item_report?
+          # if teacher wants to show report anonymously . The order of students should be random
+          @students = @student_class_section.nil? ? @student_class.students : @student_class_section.students
+        else
+          @students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+        end
+		
+        @user_ids = @students.collect{|student| student.user_id}
+		
+        unless(params[:assignment_id].blank? && @student_class.last_active_assignment.nil?)
+          @class_assignment_id = (params[:assignment_id] || @student_class.last_active_assignment).to_i
+          @class_assignments = @student_class.class_assignments(true).collect { |a| a unless a.sequence_id.nil? }.compact
+          @class_assignment = ClassAssignment.find(@class_assignment_id)
+
+          if @class_assignment.mastery_learning?
+            redirect_to(:action => "mastery_status",
+              :id => @student_class.id,
+              :assignment_id => @class_assignment_id,
+              :section_id => (@student_class_section.nil?)? nil:@student_class_section.id)
+          end
+
+          #Added for due date purposes
+          assignment_logs = AssignmentLog.find(:all, :conditions => {:assignment_id => @class_assignment_id, :assignment_type => 'ClassAssignment'})
+          @assignment_logs = Hash.new
+          assignment_logs.each {|log| @assignment_logs[log.user_id] = log}
+
+          #when user switches the classes, finding the class asignment with same sequence
+          if @class_assignments.find{|assignment| assignment.id == @class_assignment_id}.nil?
+            begin
+              seq_id = ClassAssignment.find(@class_assignment_id).sequence_id
+              class_assignment = @class_assignments.find{|assignment| assignment.sequence_id == seq_id }
+              @class_assignment_id = (class_assignment.nil? ? @student_class.last_active_assignment : class_assignment.id).to_i
+            rescue ActiveRecord::RecordNotFound
+              set_flash :warning, "This class assignment doesn't exist."
+              redirect_to :controller => "folder",:action =>"index"
+            end
+          end
+		  
+          # get only the assistments for this current sequence
+		
+          if params[:sequence_section_id].nil? or params[:sequence_section_id] == ""
+            @parent_section_id = @class_assignment.sequence.head_section_id
+          else
+            begin
+              @parent_section_id = params[:sequence_section_id]
+              if Section.find_by_id(@parent_section_id).sequence_id != @class_assignment.sequence_id
+                @parent_section_id = nil
+              end
+            end
+          end
+          problem_logs = ProblemLog.find_by_sql(
+            "select t5.*, t6.value, t4.position from
+				(select t2.parent_id as parent_section_id, 
+				cast(substring(t1.parameters from '%AssistmentID: #\"[0-9]+#\"%' for '#') as numeric) as assistment_id 
+				from sections as t1 
+				inner join section_links as t2 on t1.id = t2.child_id  where t2.parent_id = #{@parent_section_id}) t3  
+				left outer join problems as t4 using (assistment_id)
+				inner join problem_logs as t5 on t4.id = t5.problem_id 
+				left outer join answers as t6 on t5.answer_id = t6.id
+				where t5.assignment_id = #{@class_assignment_id} and t5.original = 1 and t5.assignment_type ='ClassAssignment' 
+				order by t5.start_time;")
+          hints_usage = ProblemLog.find_by_sql(["select user_id,problem_id,assistment_id,sum(hint_count) as hint_count,sum(bottom_hint) as bottom_hint
+				from problem_logs 
+				inner join 
+				(select t2.parent_id as parent_section_id, cast(substring(t1.parameters from '%AssistmentID: #\"[0-9]+#\"%' for '#') as numeric) as assistment_id from sections as t1 
+				inner join section_links as t2 on t1.id = t2.child_id  where t2.parent_id = 148296) as t3 
+				using (assistment_id) 
+				where assignment_id=? and problem_logs.assignment_type = 'ClassAssignment' 
+				group by user_id,problem_id,assistment_id 
+				order by user_id",@class_assignment_id])
+
+		  
+          # get all of the sections in this sequences where the section contains problem_sections
+          @sequence_section = Section.find_by_sql("select distinct on (t2.parent_id)
+			t1.*, t2.parent_id as parent_section_id, t3.type as section_type, 
+			CASE WHEN t3.name IS NULL THEN 'nameless' ELSE t3.name END as section_name from sections as t1 
+			inner join section_links as t2 on t1.id = t2.child_id 
+			inner join sections as t3 on t2.parent_id = t3.id
+			WHERE t1.type ~'^ProblemSection' and t1.sequence_id = 
+			(select sequence_id from class_assignments where id = #{@class_assignment_id})")
+		  
+          @problems = Array.new
+          @assistments = Hash.new
+          @matrix = Hash.new
+          @student_average = Hash.new
+          @problem_average = Hash.new
+          @total_hint = Hash.new
+          @bottom_hint = Hash.new
+          @problem_positions = Hash.new
+          #@assistments_type = Hash.new
+          @help_requested = Hash.new(0)
+		  
+          #delete the record for those students who are not in the class anymore
+          problem_logs.reject!{|x| x unless @students.collect{|y| y.user_id}.include? x.user_id}||problem_logs
+          hints_usage.reject!{|x| x unless @students.collect{|y| y.user_id}.include? x.user_id}||hints_usage
+          problem_logs.each do |log|
+            @matrix[log.user_id] = Hash.new if @matrix[log.user_id].nil?
+            @matrix[log.user_id][log.problem_id]=log
+            @student_average[log.user_id] = Hash.new(0) if @student_average[log.user_id].nil?
+            @student_average[log.user_id]["total_done"] += 1 unless log.end_time.nil? or log.correct.nil?
+            @student_average[log.user_id]["total_correct"] += log.correct unless log.correct.nil?
+            @problem_average[log.problem_id] = Hash.new(0) if @problem_average[log.problem_id].nil?
+            @problem_average[log.problem_id]["total_done"] += 1 unless log.end_time.nil? or log.correct.nil?
+            @problem_average[log.problem_id]["total_correct"] += log.correct unless log.correct.nil?
+            @problem_positions[log.problem_id] = log.position
+            @help_requested[log.problem_id]+=1 if log.first_action == 1 or log.first_action == 2
+            @problems << log.problem_id
+            @assistments[log.problem_id] =log.assistment_id
+            #@assistments_type[log.assistment_id]=log.assistment_type_id
+          end
+          @ass = Assistment.find(@assistments.values)
+          @problems.uniq!
+          @main_problems = Hash.new
+          @assistments.values.uniq.each do |assistment|
+            get_main_problem_with_scaffolds(assistment)
+          end
+          hints_usage.each do |l|
+            @total_hint[l.user_id] = 0 if @total_hint[l.user_id].nil?
+            @total_hint[l.user_id] += l.hint_count unless l.hint_count.nil?
+            @bottom_hint[l.user_id] = Hash.new if @bottom_hint[l.user_id].nil?
+            @bottom_hint[l.user_id][l.problem_id] = l.bottom_hint
+          end
+          #build common wrong answers
+          wrong_answers_logs = ActiveRecord::Base.connection.execute(<<-EOS
+            select goo.problem_id,goo.answer_text,goo.value,goo.percent from
+            (select foo.problem_id,foo.count,answer_text,value,wrong_per_problem.count as count1,foo.count*1.0/wrong_per_problem.count*1.0 as percent from (
+              select count(*) as count,answer_text,answer_id,problem_id
+              from problem_logs
+              where correct=0 and first_action=0 and problem_logs.assignment_id= #{@class_assignment_id} and problem_logs.original=1 and problem_logs.assignment_type = 'ClassAssignment'
+              group by answer_text, answer_id,problem_id
+              having count(*)> 3
+              order by count desc)  as foo
+            left outer join  answers on foo.answer_id = answers.id
+            left outer join
+              (select count(*) as count,problem_id
+              from problem_logs
+              where correct=0 and first_action=0 and problem_logs.assignment_id= #{@class_assignment_id} and problem_logs.assignment_type = 'ClassAssignment'
+              group by problem_id
+              order by count desc) as wrong_per_problem on wrong_per_problem.problem_id=foo.problem_id
+            order by problem_id, foo.count desc)
+            as goo
+            where goo.percent >= 0.1
+            EOS
+          ).result
+          wrong_answers_logs.each do |log|
+            @common_wrong_answers[log[0].to_i] = Array.new if @common_wrong_answers[log[0].to_i].nil?
+            @common_wrong_answers[log[0].to_i] << log.slice(1..3)
+          end
+        
+   		  #show all transfer models
+          #@transfer_models = Domain.find(:all,:order =>'transfer_models.id' ,:include => [{:subject, :framework},:model_inferred_from])
+          #only show public transfer models and his own transfer_models
+          @transfer_models = Domain.find(:all, :joins => "left outer join transfer_model_ownerships on transfer_models.id = transfer_model_ownerships.domain_id",:include => [{:subject, :framework},:model_inferred_from], :conditions => "transfer_models.is_public is true or content_creator_id = #{current_user.content_creator.id}")
+          if params[:domain_id].nil?
+            #need to change to filter by grade
+            @domain_id = @transfer_models.first.id
+          else
+            @domain_id = params[:domain_id].to_i
+          end
+          @transfer_model = Domain.find(@domain_id)
+          @welldone = params[:welldone]||100
+          @hard = params[:hard]||0
+          @least_met_times = params[:least_met_times]||10
+          @least_tagged_times = params[:least_tagged_times]||3
+          #change this to use MetadataTagging model
+          #kc_tagged_times = ProblemToSkillAssociation.find_by_sql(["select skill_id, count(*) as count from     problem_to_skill_associations left outer join skills on skills.id = skill_id where skills.domain_id = ? group by     skill_id order by count", @domain_id])
+
+          kc_tagged_times  = MetatdataTaggings.find_by_sql("select metadata_value_id as skill_id, count(*) as count from metadata_taggins where metadata_target_id = #{MetadataTarget::PROBLEM}
+                                    and metadata_definition_id = #{MetadataDefinition::SKILL} group by metadata_value_id order by count")
+          exclude_tag = Array.new
+          kc_tagged_times.each do |kc|
+            exclude_tag << kc.skill_id.to_i if kc.count.to_i < @least_tagged_times.to_i
+          end
+          exclude_tag_ids = "("
+          exclude_tag.each {|a| exclude_tag_ids += a.to_s + ","}
+          exclude_tag_ids += "-1)"
+          @all = true if params[:class]=="all"
+          infer_model = @transfer_model.model_inferred_from
+          joins = ""
+          i = 1
+          group_by = "s0.code, s0.name, s0.id "
+          #select = "s0.name as name0, s0.id as id0,sum(FLOOR(problem_logs.correct)) as skill_correct,count(problem_logs) as     skill_done"
+          select = "s0.code, s0.name as name0, s0.id as id0,sum(problem_logs.correct) as skill_correct,count(problem_logs) as skill_done"
+          until infer_model.nil?
+            joins += "left outer join skill_to_skill_mappings as stsm#{i} on stsm#{i}.skill_id1 = s#{i-1}.id left outer join skills as     s#{i} on s#{i}.id = stsm#{i}.skill_id2 "
+            group_by.insert(0, "s#{i}.name, s#{i}.id,")
+            select.insert(0,"s#{i}.name as name#{i},s#{i}.id as id#{i}, ")
+            i += 1
+            infer_model = infer_model.model_inferred_from
+          end
+          @records = ProblemLog.find_by_sql([
+              "select #{select} from problem_logs "+
+                "left outer join problem_to_skill_associations on problem_logs.problem_id = problem_to_skill_associations.problem_id "+
+                "left outer join skills as s0 on problem_to_skill_associations.skill_id = s0.id "+
+                "#{joins} "+
+                "where assignment_id=? and s#{i-1}.domain_id = ? and s0.id not in #{exclude_tag_ids} and problem_logs.correct is not null and problem_logs.assignment_type = 'ClassAssignment' "+
+                "group by #{group_by}",@class_assignment_id,@domain_id
+            ])
+          skill_rate = Hash.new
+          @records.each do|record|
+            skill = [record["name#{i-1}"],record["id#{i-1}"]]
+            skill_rate[skill] = Hash.new if skill_rate[skill].nil?
+            skill_rate[skill]["skills"] = Array.new if skill_rate[skill]["skills"].nil?
+            skill_rate[skill]["skills"] << record.code + ' - ' + record.name0
+            skill_rate[skill]["correct"] = 0 if skill_rate[skill]["correct"].nil?
+            skill_rate[skill]["correct"] += record.skill_correct.to_f
+            skill_rate[skill]["done"] = 0 if skill_rate[skill]["done"].nil?
+            skill_rate[skill]["done"] += record.skill_done.to_i
+          end
+          skill_rate.each_pair do |key,value|
+            problems_with_skill = Skill.find(key[1]).main_problems.collect{|p| p.id}
+            value["problems"] = @problems.find_all{|p| @problem_average[p]["total_done"]>0}.sort{|a,b| (@problem_average[b]["total_correct"].to_f * 100 / @problem_average[b]["total_done"]).to_i <=>(@problem_average[a]["total_correct"].to_f * 100 / @problem_average[a]["total_done"]).to_i} & problems_with_skill
+          end
+          skill_rate.delete_if{|key,value| value["done"] < @least_met_times.to_i}
+          @skill_rates = skill_rate.sort{|a,b| b[1]["correct"].to_f/b[1]["done"].to_f <=> a[1]["correct"].to_f/a[1]["done"].to_f}
+          if params[:doctype]=="excel"
+            send_data gen_excel_item_level , :filename => "item_level_report.csv", :type => "application/excel"
+          end
+        else
+          set_flash :warning, "You have no item/mastery assignments to view right now."
+        end
+      end
+    rescue ActiveRecord::RecordNotFound
+      set_flash :warning, "This class doesn't exist."
+      redirect_to :controller => "student_class",:action =>"index"  
+    end
+  end
+  
+  def save_incorrect_message
+    @problem = Problem.find_by_id(params[:problem_id])
+    @answer = @problem.answers.create(params[:answer])
+  end
+
+  def visit_report
+    redirect_to :controller => 'teacher/folder', :action => 'index'
+  end
+  
+  def class_level_skill
+    @student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}	
+    unless params[:id].nil? or params[:id].to_i==0
+      @student_class = StudentClass.find(params[:id].to_i)
+      @student_classes.reject! {|student_class| student_class.disabled?} unless @student_class.disabled?
+    end
+    #show all transfer models
+    #@transfer_models = Domain.find(:all,:order =>'transfer_models.id' ,:include => [{:subject, :framework},:model_inferred_from])
+    #only show public transfer models and his own transfer_models
+    @transfer_models = Domain.find(:all, :joins => "left outer join transfer_model_ownerships on transfer_models.id = transfer_model_ownerships.domain_id",:include => [{:subject, :framework},:model_inferred_from], :conditions => "transfer_models.is_public is true or content_creator_id = #{current_user.content_creator.id}")
+    if params[:domain_id].nil?
+      #need to change to filter by grade
+      @domain_id = @transfer_models.first.id
+    else
+      @domain_id = params[:domain_id].to_i
+    end
+    @transfer_model = Domain.find(@domain_id)
+    @welldone = params[:welldone]||100
+    @hard = params[:hard]||0
+    @least_met_times = params[:least_met_times]||10
+    @least_tagged_times = params[:least_tagged_times]||3
+    #change this to use MetadataTagging model
+    kc_tagged_times = ProblemToSkillAssociation.find_by_sql(["select skill_id, count(*) as count from problem_to_skill_associations left outer join skills on skills.id = skill_id where skills.domain_id = ? group by skill_id order by count", @domain_id])
+    exclude_tag = Array.new
+    kc_tagged_times.each do |kc|
+      exclude_tag << kc.skill_id.to_i if kc.count.to_i < @least_tagged_times.to_i
+    end
+    exclude_tag_ids = "("
+    exclude_tag.each {|a| exclude_tag_ids += a.to_s + ","}
+    exclude_tag_ids += "-1)"
+    @all = true if params[:class]=="all"
+    infer_model = @transfer_model.model_inferred_from
+    joins = ""
+    i = 1
+    group_by = "s0.code, s0.name, s0.id "
+    #select = "s0.name as name0, s0.id as id0,sum(FLOOR(problem_logs.correct)) as skill_correct,count(problem_logs) as skill_done"
+    select = "s0.code, s0.name as name0, s0.id as id0,sum(problem_logs.correct) as skill_correct,count(problem_logs) as skill_done"
+    until infer_model.nil?
+      joins += "left outer join skill_to_skill_mappings as stsm#{i} on stsm#{i}.skill_id1 = s#{i-1}.id left outer join skills as s#{i} on s#{i}.id = stsm#{i}.skill_id2 "
+      group_by.insert(0, "s#{i}.code, s#{i}.name, s#{i}.id,")
+      select.insert(0,"s#{i}.code, s#{i}.name as name#{i},s#{i}.id as id#{i}, ")
+      i += 1
+      infer_model = infer_model.model_inferred_from
+    end
+    if(@all)
+      student_class_ids = "("
+      @student_classes.each {|a| student_class_ids += a.id.to_s + ","}
+      student_class_ids += "-1)"
+      @records = ProblemLog.find_by_sql([
+          "select #{select} from problem_logs "+
+            "left outer join class_assignments on problem_logs.assignment_id = class_assignments.id "+
+            "left outer join problem_to_skill_associations on problem_logs.problem_id = problem_to_skill_associations.problem_id "+
+            "left outer join skills as s0 on problem_to_skill_associations.skill_id = s0.id "+
+            "#{joins} "+
+            "where class_assignments.student_class_id in #{student_class_ids} and s#{i-1}.domain_id = ? and s0.id not in #{exclude_tag_ids} and problem_logs.correct is not null and problem_logs.assignment_type = 'ClassAssignment' "+
+            "group by #{group_by}",@domain_id
+        ])
+    else
+      @records = ProblemLog.find_by_sql([
+          "select #{select} from problem_logs "+
+            "left outer join class_assignments on problem_logs.assignment_id = class_assignments.id "+
+            "left outer join problem_to_skill_associations on problem_logs.problem_id = problem_to_skill_associations.problem_id "+
+            "left outer join skills as s0 on problem_to_skill_associations.skill_id = s0.id "+
+            "#{joins} "+
+            "where class_assignments.student_class_id = ? and s#{i-1}.domain_id = ? and s0.id not in #{exclude_tag_ids} and problem_logs.correct is not null and problem_logs.assignment_type = 'ClassAssignment' "+
+            "group by #{group_by}",@student_class.id,@domain_id
+        ])
+    end
+    skill_rate = Hash.new
+    @records.each do|record|
+      skill = [record["name#{i-1}"],record["id#{i-1}"]]
+      skill_rate[skill] = Hash.new if skill_rate[skill].nil?
+      skill_rate[skill]["skills"] = Array.new if skill_rate[skill]["skills"].nil?
+      skill_rate[skill]["skills"] << record.code + ' - ' + record.name0
+      skill_rate[skill]["correct"] = 0 if skill_rate[skill]["correct"].nil?
+      skill_rate[skill]["correct"] += record.skill_correct.to_f
+      skill_rate[skill]["done"] = 0 if skill_rate[skill]["done"].nil?
+      skill_rate[skill]["done"] += record.skill_done.to_i
+    end
+    skill_rate.delete_if{|key,value| value["done"] < @least_met_times.to_i}
+    @skill_rates = skill_rate.sort{|a,b| b[1]["correct"].to_f/b[1]["done"].to_f <=> a[1]["correct"].to_f/a[1]["done"].to_f}
+  end
+  
+  def skill_level
+    @student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}	
+    unless params[:id].nil? or params[:id].to_i==0
+      @student_class = StudentClass.find(params[:id].to_i)
+      @student_classes.reject! {|student_class| student_class.disabled?} unless @student_class.disabled?
+    end
+    @welldone = params[:welldone]||Tag.find_by_sql("select * from tags where parent_id=1").size
+    @hard = params[:hard]||0
+    @least_met_times = params[:least_met_times]||10
+    @least_tagged_times = params[:least_tagged_times]||3
+    kc_tagged_times = Tagging.find_by_sql("select taggings.tag_id,count(taggings.id) as count from taggings "+ 
+        "left outer join tags on taggings.tag_id=tags.id "+
+        "where tags.parent_id=1 "+
+        "group by taggings.tag_id "+
+        "order by count ")
+    exclude_tag = Array.new
+    kc_tagged_times.each do |kc|
+      exclude_tag << kc.tag_id.to_i if kc.count.to_i < @least_tagged_times.to_i
+    end
+    exclude_tag_ids = "("
+    exclude_tag.each {|a| exclude_tag_ids += a.to_s + ","}
+    exclude_tag_ids += "-1)"
+    mappings = KnowledgeComponentMapping.find_by_sql("select t1.id,t2.name as name_39,t3.name as name_5 from tags t1 "+
+        "left outer join knowledge_component_mappings kcm1 on kcm1.tag_id_1 = t1.id "+
+        "left outer join knowledge_component_mappings kcm2 on kcm2.tag_id_1 = kcm1.tag_id_2 "+
+        "left outer join tags t2 on t2.id = kcm1.tag_id_2 "+
+        "left outer join tags t3 on t3.id = kcm2.tag_id_2 "+
+        "where t1.parent_id=1")
+    @kc_mappings = Hash.new
+    mappings.each do|mapping|
+      @kc_mappings[mapping.id] = mapping
+    end
+    @all = true if params[:class]=="all"
+    if(@all)
+      student_class_ids = "("
+      @student_classes.each {|a| student_class_ids += a.id.to_s + ","}
+      student_class_ids += "-1)"
+      @logs = ProblemLog.find_by_sql([
+          "select * from (select tags.name,taggings.tag_id,sum(FLOOR(problem_logs.correct)) as skill_correct,count(problem_logs) as skill_done,sum(problem_logs.correct)*1.0/count(problem_logs)*1.0 as skill_rate from problem_logs "+
+            "left outer join class_assignments on problem_logs.assignment_id = class_assignments.id "+
+            "left outer join taggings on problem_logs.problem_id = taggings.taggable_id "+
+            "left outer join tags on taggings.tag_id = tags.id "+
+            "where class_assignments.student_class_id in #{student_class_ids} and taggings.taggable_type like '%Problem%' and tags.parent_id=1 and tags.id not in #{exclude_tag_ids} and problem_logs.correct is not null and problem_logs.assignment_type = 'ClassAssignment' "+
+            "group by tags.name, taggings.tag_id "+
+            "order by skill_rate desc) as logs where skill_done>? ",@least_met_times
+        ])
+    else
+      @logs = ProblemLog.find_by_sql([
+          "select * from (select tags.name,taggings.tag_id,sum(FLOOR(problem_logs.correct)) as skill_correct,count(problem_logs) as skill_done,sum(problem_logs.correct)*1.0/count(problem_logs)*1.0 as skill_rate from problem_logs "+
+            "left outer join class_assignments on problem_logs.assignment_id = class_assignments.id "+
+            "left outer join taggings on problem_logs.problem_id = taggings.taggable_id "+
+            "left outer join tags on taggings.tag_id = tags.id "+
+            "where class_assignments.student_class_id = ? and taggings.taggable_type like '%Problem%' and tags.parent_id=1 and tags.id not in #{exclude_tag_ids} and problem_logs.correct is not null and problem_logs.assignment_type = 'ClassAssignment' "+
+            "group by tags.name, taggings.tag_id "+
+            "order by skill_rate desc) as logs where skill_done>? ",@student_class.id,@least_met_times
+        ])
+    end	
+  end
+  
+  def get_problems
+    #Finds the list of all problems that have that skill or any skill which is inferred from that skill
+    # prints out only assistments which were not made from variablized assistments
+
+    @is_staff = current_user.is_administrator? or current_user.is_staff?
+    @user_owned_assistments = current_user.content_creator.assistments
+
+    @skills = Array.new
+
+    if params[:node_id]
+      @skill = StandardHierarchyNode.find(params[:node_id])
+      @skills = Skill.find(:all, :conditions => "id in (select skill_id from standard_hierarchy_node_skills where standard_hierarchy_node_id = #{params[:node_id]})")
+      skill_ids = @skills.map{ |sk| sk.id}
+    else
+      @skill = Skill.find(params[:skill_id])
+      @skills << @skill
+      skill_ids = [params[:skill_id]]
+    end
+    #used for the skill description
+
+    # Take a given skill and find all skills which are inferred from this skill
+    # i.e. go from the WPI 39 skill list to the WPI 106 skill list
+    #infer_model = @skill.transfer_model.model_inferred_from
+=begin
+    until infer_model.nil?
+      skills = Array.new
+      @skills.flatten.each do |skill|
+        skills << skill.parent_skills
+      end
+      infer_model = skills.flatten.last.transfer_model.model_inferred_from
+      @skills << skills.flatten
+    end
+	
+    # make the list of skills into a comma seperated list
+    @the_list_skills = "#{@skills[0].id}"
+    @skills.flatten.each do |a_skill|
+      @the_list_skills = "#{@the_list_skills},#{a_skill.id}"
+    end
+	
+    # select problems which have the skill, containing assistment, the type (variablized?), and quality level
+    # This is the list of problems that are not made from a variablized assistment which match the current skill
+    @other_problems_A = Skill.find_by_sql(" select t1.problem_id, t1.skill_id, t2.assistment_id, t2.body, t3.assistment_type_id, t4.quality_level_id from problem_to_skill_associations as t1 left outer join problems as t2 on t1.problem_id = t2.id left outer join assistments as t3 on t2.assistment_id = t3.id inner join assistment_infos as t4 on t3.id = t4.assistment_id where t4.parent_id is null and t1.skill_id in (#{@the_list_skills}) and t2.name ~\'^(Ma)\'; ")
+=end
+    @the_list_skills = "#{skill_ids.join(',')}"
+		@other_problems_A = Skill.find_by_sql(" select pr.id as problem_id, mtgs.metadata_value_id as skill_id, pr.body , ass.assistment_type_id, ass.id as assistment_id, assinfo.quality_level_id, pr.textbook_problem from metadata_taggings mtgs
+    join problems pr on mtgs.object_id = pr.id
+    join assistments ass on pr.assistment_id = ass.id
+    join assistment_infos assinfo on assinfo.assistment_id = ass.id
+    where mtgs.metadata_definition_id = 1 --skills
+    and mtgs.metadata_value_id in (#{skill_ids.join(',')})
+    and mtgs.metadata_target_id = 1 --problems
+    and pr.name = 'Main Problem'
+    and pr.assistment_id in (select id from assistments where assistment_type_id = #{AssistmentType.default.id})
+    and pr.display ; ")
+
+  end
+
+  def get_problems_old
+    problems_with_tag = Problem.find_by_sql(['
+      select p.id as problem_id, p.body as body, s.tutor_strategy_id as scaffolded, p.assistment_id, p.position from problems p
+      right outer join taggings t on t.taggable_id = p.id
+      left outer join tutor_strategies ts on ts.problem_id = p.id
+      left outer join scaffolds s on s.tutor_strategy_id = ts.id
+      where t.tag_id = ?
+      order by scaffolded desc', params[:tag].to_i])
+    @problems = Hash.new
+    problems_with_tag.each do |problem_with_tag|
+      if @problems[problem_with_tag.scaffolded].nil?
+        @problems[problem_with_tag.problem_id] = Array.new
+        @problems[problem_with_tag.problem_id] << problem_with_tag
+      else
+        @problems[problem_with_tag.scaffolded] << problem_with_tag 
+      end
+
+    end
+  end
+  
+  # Assignment report
+  def assignment_level
+	@disable_link = "Assignment"
+	params[:id] = params[:student_class_id] if params[:id].nil?
+	
+	begin
+		@student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}
+		unless params[:id].nil?
+			@student_class = StudentClass.find(params[:id].to_i)
+			@student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+		end
+	rescue
+		set_flash :warning, "This class doesn't exist."
+		redirect_to :controller => "folder",:action =>"index"
+		return
+	end
+  
+    @assignment_folder = @student_class.assignment_folder
+    
+    unless @student_classes.include? @assignment_folder.root.owner_entity
+      set_flash :warning, "You do not have access to the requested folder"
+      redirect_to :controller => "folder", :action => "index"
+      return
+    end
+	
+	grab_folders 
+	
+	if params[:assignment_id].nil?
+		valid_assignment_type_ids = AssignmentType.find_all_by_origin("Teacher").collect{|x| x[:id]}.join(', ')
+		ati = "or assignment_type_id in (#{valid_assignment_type_ids},4)" unless valid_assignment_type_ids.empty?  #include placements tests. for some reason their origin is placements instead of teacher
+		@assignments = ClassAssignment.find(:all, :conditions => "student_class_id = #{@student_class.id} and (assignment_type_id is null #{ati})", :order => 'position desc', :limit => 20)
+	else
+		@assignments = ClassAssignment.find_all_by_id(params[:assignment_id])
+	end
+    @assignment_count = @assignments.size
+	if @student_class.anonymize_item_report?
+		@anonymize = true
+		@students = @student_class.get_students_randomly
+	else
+		@anonymize = false
+		@students = @student_class.get_students_by_last_name
+	end
+	@show_students = @students
+    
+#		@assignments.reject! {|ca| ca.arrs?}	
+#		@assignments.reject! {|ca| !ca.originates_from_teacher?}										
+		assignment_level_progress
+		
+	end
+
+  def assignment_level_progress
+	# getting progresses for @students and @assignments
+	student_user_ids = @students.collect{|s| s.user.id}
+	assignment_ids = @assignments.collect{|a| a.id} 
+	@assignment_logs = AssignmentLog.find(:all, :conditions => ["assignment_id in (?) and user_id in (?) and assignment_type = 'ClassAssignment'", assignment_ids, student_user_ids])
+
+	#building the progress hash now
+	@progresses = Hash.new
+	@assignment_logs.each do |progress|
+		@progresses[progress.user_id] = Hash.new if @progresses[progress.user_id].nil?
+		@progresses[progress.user_id][progress.assignment_id] = Hash.new if @progresses[progress.user_id][progress.assignment_id].nil?
+		@progresses[progress.user_id][progress.assignment_id] = progress
+	end
+	
+	# calculating averages
+	@average = Hash.new
+	
+	assistments = ProblemLog.find_by_sql(
+		["select l.* "+
+		"from problem_logs l, class_assignments c "+
+		"where c.id in (?) and l.assignment_id = c.id and c.student_class_id = ? and l.end_time is not null and l.assignment_type = 'ClassAssignment' "+
+		"order by l.assignment_id, l.end_time desc", assignment_ids, @student_class.id]
+	)
+	assistments.each do |assistment|
+	
+		next unless assistment.original == 1
+		@average[assistment.user_id] = Hash.new if @average[assistment.user_id].nil?
+		if @average[assistment.user_id][assistment.assignment_id].nil?
+			@average[assistment.user_id][assistment.assignment_id] = Hash.new 
+			@average[assistment.user_id][assistment.assignment_id]['total_done'] = 0
+			@average[assistment.user_id][assistment.assignment_id]['total_correct'] = 0
+		end
+		@average[assistment.user_id][assistment.assignment_id]['total_done'] += 1 unless assistment.correct.nil?
+		@average[assistment.user_id][assistment.assignment_id]['total_correct'] += assistment.correct unless assistment.correct.nil?
+	end
+	@class_average = Hash.new
+	@number_of_started = Hash.new
+	@assignments.each do |assignment|
+		@number_of_started[assignment.id] = @progresses.select{|k,v| !@progresses[k][assignment.id].nil?}.size
+		if @class_average[assignment.id].nil?
+			@class_average[assignment.id] = Hash.new
+			@class_average[assignment.id]['average']=0
+			@class_average[assignment.id]['complete']=0
+		end
+
+		@progresses.select{|k,v| !@progresses[k][assignment.id].nil? }.each do |student|
+			@class_average[assignment.id]['complete'] += 1 if @progresses[student[0]][assignment.id].complete?
+			@class_average[assignment.id]['average'] +=(@average[student[0]][assignment.id]['total_correct']*100/@average[student[0]][assignment.id]['total_done']) unless  @average[student[0]].nil? or @average[student[0]][assignment.id].nil? or @average[student[0]][assignment.id]['total_done'] == 0 	
+		end
+		@class_average[assignment.id]['average'] = (@class_average[assignment.id]['average']/(@progresses.select{|k,v| !@progresses[k][assignment.id].nil?}.size)).to_i.to_s unless (@progresses.select{|k,v| !@progresses[k][assignment.id].nil?}.size) ==0
+		@class_average[assignment.id]['complete'] = (@class_average[assignment.id]['complete']*100/@students.size).to_i.to_s unless @students.size == 0
+		
+	end
+	
+	
+  end
+  
+  def customize_report
+  
+	params[:id] = params[:student_class_id] if params[:id].nil?
+	if params[:id].nil?
+		set_flash :warning, "Please select a class"
+		return
+	end
+	
+	@anonymize = params[:anonymize] == "true"
+	@customized = true
+	
+	begin
+		@student_class = StudentClass.find(params[:id].to_i)
+		@student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+	rescue
+		set_flash :warning, "This class doesn't exist."
+		redirect_to :controller => "folder",:action =>"index"
+		return
+	end
+	
+	if params[:assignments].nil? or params[:assignments].empty? or params[:students].nil? or params[:students].empty?
+		if params[:anon_changed] == "true"
+			if @anonymize
+				@students = @student_class.get_students_randomly
+			else
+				@students = @student_class.get_students_by_last_name
+			end
+			valid_assignment_type_ids = AssignmentType.find_all_by_origin("Teacher").collect{|x| x[:id]}.join(', ')
+			ati = "or assignment_type_id in (#{valid_assignment_type_ids},4)" unless valid_assignment_type_ids.empty?  #include placements tests. for some reason their origin is placements instead of teacher
+			@assignments = ClassAssignment.find(:all, :conditions => "student_class_id = #{@student_class.id} and (assignment_type_id is null #{ati})", :order => 'position desc', :limit => 20)
+		elsif (!params[:doctype].nil? and !params[:doctype].blank?)
+			@students = @student_class.get_students_by_last_name
+			valid_assignment_type_ids = AssignmentType.find_all_by_origin("Teacher").collect{|x| x[:id]}.join(', ')
+			ati = "or assignment_type_id in (#{valid_assignment_type_ids},4)" unless valid_assignment_type_ids.empty?  #include placements tests. for some reason their origin is placements instead of teacher
+			@assignments = ClassAssignment.find(:all, :conditions => "student_class_id = #{@student_class.id} and (assignment_type_id is null #{ati})", :order => 'position desc', :limit => 20)
+		else
+			set_flash :warning, "Please select assignments and students"
+			return
+		end
+	end
+  
+  
+	
+	@assignments ||= ClassAssignment.find(params[:assignments], :order => 'position desc')
+    @assignment_count = @assignments.size
+	@students ||= @student_class.get_students_by_last_name
+	if params[:students].nil?
+		@show_students = @students
+	else
+		@show_students ||= @students.select{|student| params[:students].include?(student.id.to_s)}
+	end
+										
+	assignment_level_progress
+  
+  
+  end
+  
+  def download_report
+	params[:assignments] = params[:assignments].split(",")
+	params[:students] = params[:students].split(",")
+	params[:id] = params[:id].nil? ? params[:student_class_id] : params[:id]
+	@student_class = StudentClass.find(params[:id].to_i)
+	@assignments = ClassAssignment.find(params[:assignments], :order => 'position desc')
+	@students = @student_class.get_students_by_last_name
+	@show_students = @students.select{|student| params[:students].include?(student.id.to_s)}
+	
+	assignment_level_progress
+  
+	# if user asks for pdf generate pdf report for all assignments
+	if params[:doctype]=="pdf"
+		hints_usage = ProblemLog.find_by_sql([
+				"select user_id,assignment_id,sum(hint_count) as hint_count "+
+					"from problem_logs "+
+					"left outer join class_assignments on class_assignments.id=assignment_id "+
+					"where student_class_id=? and problem_logs.assignment_type = 'ClassAssignment' "+
+					"group by user_id,assignment_id "+
+					"order by user_id",@student_class.id])
+		@total_hints = Hash.new
+		
+		hints_usage.each do |l|
+			@total_hints[l.user_id] = Hash.new if @total_hints[l.user_id].nil?
+			@total_hints[l.user_id][l.assignment_id] = 0 if @total_hints[l.user_id][l.assignment_id].nil?
+			@total_hints[l.user_id][l.assignment_id] += l.hint_count unless l.hint_count.nil?
+		end
+		send_data gen_pdf_assignment_report, :filename => "assignment_report.pdf", :type => "application/pdf" 
+	end
+	if params[:doctype]=="excel"
+		send_data gen_excel_assignment_level , :filename => "assignment_level.csv", :type => "application/excel"
+	end
+  
+  end
+  
+
+  def individual_student_level
+	
+	unless params[:id].nil?
+		@student_class = StudentClass.find(params[:id].to_i)
+		@student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+	else
+		set_flash :warning, "Select a class."
+		redirect_to :controller => "folder",:action =>"index"
+		return
+	end
+	
+	params[:student_user_id] = params[:user] if params[:student_user_id].nil?
+	
+	unless params[:student_user_id].nil?
+		@student_user = User.find(params[:student_user_id], :include => :user_detail)
+	else
+		set_flash :warning, "Select a student."
+		redirect_to :controller => "folder", :action=>"index"
+		return
+	end
+	
+	@disable_link = "individual_student_#{params[:student_user_id]}"
+	
+	@student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}
+	
+	unless @student_classes.include? @student_class
+      set_flash :warning, "You do not have access to that class"
+      redirect_to :controller => "folder", :action => "index"
+      return
+    end
+	
+	if !params[:assignment_from].nil?
+	
+		if params[:assignment_from] == "type" and (params[:types].nil? or params[:types].empty?)
+			params[:assignment_from] = nil
+			flash[:warning] = "You need to pick some Assignment Types"
+		elsif params[:assignment_from] == "specific" and (params[:assignments].nil? or params[:assignments].empty?)
+			params[:assignment_from] = nil
+			flash[:warning] = "You need to pick some Assignments"
+		end
+		
+	end
+	
+	if flash[:warning].nil?
+		@assignment_folder = @student_class.assignment_folder
+		grab_folders 
+		
+		if params[:assignment_from].nil? or params[:assignment_from] == "type"
+			conditions = ""
+			if !params[:assignment_from].nil? and params[:assignment_from] == "type"
+				conditions = " and assignment_type_id in ("
+				#selecting all types gives "1_r, 1_sk, 7, 6,4"
+				conditions += params[:types].map{|x| x.to_i}.join(",") #now we have one string "1,7,6,4"
+				if conditions.include?("#{AssignmentType::PLACEMENTS_TEST}")
+					#if we are looking for placements tests then add remediations and reactions too.
+					conditions += ",#{AssignmentType::PLACEMENTS_ADVANCED},#{AssignmentType::PLACEMENTS_REMEDIATION}"
+				end
+				conditions += ")"
+			elsif params[:assignment_from].nil? and !params[:assign_string].nil?
+				conditions = " and id in (#{params[:assign_string]})"
+			end
+			
+			@assignments = ClassAssignment.find(:all, :conditions => "student_class_id = #{@student_class.id} #{conditions}", :order => 'position desc')
+			@assignments = @assignments.select{|x| x.assigned_to_student(@student_user.student.id) == true}
+			@reactions = ReactionAssignment.find_all_by_student_id(@student_user.student.id, :conditions => "student_class_id = #{params[:id]} and status != 'Discontinued'")
+			@assignments = @assignments.delete_if{|x| x.originates_from_placements? and x.assignment_type_id != AssignmentType::PLACEMENTS_TEST and !(@reactions.map{|y| y.class_assignment_id}.include?(x.id))}
+			@assigned_types = @assignments.map{|x| x.assignment_type_id.to_s}.uniq
+			
+			if @assigned_types.include?("1")
+				
+				@assigned_types << "1_sk" if @assignments.select{|x| x.assignment_type_id == AssignmentType::CLASS and x.mastery_learning?}.size > 0
+				@assigned_types << "1_r"  if @assignments.select{|x| x.assignment_type_id == AssignmentType::CLASS and !x.mastery_learning?}.size > 0
+			end
+			
+			if conditions.include?("1")
+				if !params[:types].include?("1_sk") #we want skill builders
+					@assignments = @assignments.delete_if {|x| x.assignment_type_id == AssignmentType::CLASS and x.mastery_learning?}
+				end
+				if !params[:types].include?("1_r") #we want regular assignments
+					@assignment = @assignments.delete_if {|x| x.assignment_type_id == AssignmentType::CLASS and !x.mastery_learning?}
+				end
+			end
+		
+		elsif params[:assignment_from] == "specific"
+			@assignments = ClassAssignment.find(params[:assignments], :order => 'position desc')
+			if @assignments.map{|x| x.assignment_type_id}.include?(AssignmentType::PLACEMENTS_TEST)
+				@reactions = ReactionAssignment.find_all_by_student_id(@student_user.student.id, :conditions => "student_class_id = #{params[:id]} and status != 'Discontinued'")
+				@reactions = @reactions.select{|x| @assignments.map{|y| y.id}.include?(x.origin_assignment_id)}
+				@assignments << ClassAssignment.find(@reactions.map{|x| x.class_assignment_id})
+				@assignments.flatten!
+			end
+		end
+		
+		@remediation_positions = Hash.new
+		@assignments.select{|x| x.assignment_type_id == AssignmentType::PLACEMENTS_REMEDIATION}.each{|remediation|
+			reaction = @reactions.select{|x| x.class_assignment_id ==  remediation.id}[0] #only ever be one
+			parent_position = @assignments.select{|x| x.id == reaction.origin_assignment_id}[0].position
+			@remediation_positions[remediation.id.to_s] = (parent_position - 0.1)
+		}  
+	
+		@assignment_count = @assignments.size
+		individual_student_level_progress
+	end
+ 
+	if params[:assignment_from] or !flash[:warning].nil?
+		render :update do |page|
+			if flash[:warning].nil?
+				page.replace_html("student_data", :partial => "individual_level_student_data")
+				page.replace "download_report_div", :partial=> "download_individual_report"
+				page << "update_table();"
+			else
+				page.insert_html :top, "customize_this_report_container", render_flash(:warning, {:id => "customize_report"})
+				page.delay(6.0) do
+					page.visual_effect :fade, 'flash_warning_customize_report'
+				end
+				page.delay(7.0) do
+					page['flash_warning_customize_report'].remove
+				end
+			end
+		end
+	end
+  end
+  
+  def individual_student_level_progress
+	@student_info = Hash.new
+	assignment_ids = @assignments.collect{|a| a.id}
+	@assignment_logs = AssignmentLog.find(:all, :conditions => ["assignment_id in (?) and user_id = (?) and assignment_type = 'ClassAssignment'", assignment_ids, @student_user.id])
+	
+	#grades
+	plogs = ProblemLog.find_by_sql(
+		["select l.assignment_id, count(l.assignment_id) as done, sum(correct) as correct "+
+		"from problem_logs l, class_assignments c "+
+		"where c.id in (?) and l.assignment_id = c.id and l.user_id = ? and l.end_time is not null and l.assignment_type = 'ClassAssignment' "+
+		"group by l.assignment_id", assignment_ids, @student_user.id]
+	).each{|plog|
+		@student_info[plog.assignment_id] = Hash.new if @student_info[plog.assignment_id].nil?	
+		@student_info[plog.assignment_id]["done"] = plog.done.to_i
+		@student_info[plog.assignment_id]["correct"] = plog.correct.to_i
+		@student_info[plog.assignment_id]["percent"] = "#{((plog.correct.to_i * 100) / plog.done.to_i).to_i}%"
+	}
+	
+	@assignments.each{|assignment|
+		status = "not_started"
+		days_late = ""
+		last_worked_on = ""
+		log = @assignment_logs.select{|x| assignment.id == x.assignment_id}.first
+		
+		@student_info[assignment.id] = Hash.new if @student_info[assignment.id].nil?
+		
+		unless log.nil?
+		
+			#days late
+			if log.complete? and !assignment.due_date.nil? and assignment.due_date < log.end_time
+				days = (log.end_time.to_date - assignment.due_date.to_date).to_i
+				if days < 1
+					days_late = "Less than 1 day late"
+				elsif days == 1
+					days_late = "1 day late"
+				else
+					days_late = "#{days} days late"
+				end
+			elsif !log.complete? and !assignment.due_date.nil? and assignment.due_date < Time.now
+				days_late = "was due on #{assignment.due_date.strftime("%m-%d-%Y")}"
+			end
+			
+			unless(log.last_worked_on.nil?)
+				last_worked_on = log.last_worked_on.strftime("%m-%d-%Y")
+				last_worked_on_link = log.last_worked_on.strftime("%Y-%m-%d")
+			else
+				last_worked_on = ''
+				last_worked_on_link = ''
+			end
+			
+			if log.complete?
+				status = "correct"
+			elsif log.in_progress?
+				status = "in_progress"
+			end
+		end
+		
+		@student_info[assignment.id]["days_late"] = days_late
+		@student_info[assignment.id]["last_worked_on"] = last_worked_on
+		@student_info[assignment.id]["last_worked_on_link"] = last_worked_on_link
+		
+		@student_info[assignment.id]["status"] = status
+		
+		if assignment.assignment_type_id == 1 #Normal class assignment
+			if assignment.mastery_learning?
+				display = "Skillbuilder"
+			else
+				display = "Regular Problem Set"
+			end
+		elsif assignment.assignment_type_id == 6 #ARRS Relearning
+			display = "Relearning Assignment"
+		elsif assignment.assignment_type_id == 7 #ARRS Reassessment
+			display = "Reassessment Test"
+		else
+			display = assignment.assignment_type.display_name
+		end
+		
+		@student_info[assignment.id]["in_arrs_test"] = assignment.in_arrs_test?
+			
+		@student_info[assignment.id]["type_of_assignment"] = display
+		
+	}
+  
+  
+  
+  end
+  
+  def download_individual_report
+	params[:assignments] = params[:assignments].split(",")
+	params[:id] = params[:id].nil? ? params[:student_class_id] : params[:id]
+	@student_class = StudentClass.find(params[:id].to_i)
+	@assignments = ClassAssignment.find(params[:assignments], :order => 'position desc')
+	@student_user = User.find(params[:student_user_id])
+	
+	individual_student_level_progress
+  # if user asks for pdf generate pdf report for all assignments
+	if params[:doctype]=="pdf"
+		send_data gen_pdf_individual_report, :filename => "#{@student_user.user_detail.first_name}_#{@student_user.user_detail.last_name}_assistments_report_#{Time.now.strftime("%Y_%m_%d")}.pdf", :type => "application/pdf" 
+	end
+	if params[:doctype]=="excel"
+		send_data gen_excel_individual_level , :filename => "#{@student_user.user_detail.first_name}_#{@student_user.user_detail.last_name}_assistments_report_#{Time.now.strftime("%Y_%m_%d")}.csv", :type => "application/excel"
+	end
+  end
+	
+  def progress_report
+  
+  end
+  
+  def set_self_explanation_grade
+    @full_score = params[:full_score].to_i
+    @explanation_id = params[:explanation_id].to_i
+    self_explanation = SelfExplanation.find(@explanation_id)
+    @original_grade = self_explanation.grade
+    @grade = params[:grade].to_f
+    @pass_validation = false
+    if @grade.is_a? Numeric and @grade > 0 and @grade <= @full_score
+      @pass_validation = true
+      self_explanation.grade = (@grade/@full_score.to_f)
+      self_explanation.viewed = false
+      self_explanation.save!      
+    end
+  end
+  
+  def grade_self_explanation
+    begin
+      @student_class = StudentClass.find(params[:id], :include => :students)
+      @student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+      @student_class_section = StudentClassSection.find(params[:section_id]) unless params[:section_id].blank?
+      @student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}
+      unless @student_classes.include? @student_class
+        set_flash :warning, "You can not view other teachers' class!"
+        redirect_to :controller => "folder",:action =>"index"
+      else
+        @student_classes.reject! {|student_class| student_class.disabled?} unless @student_class.disabled?
+        if @student_class.anonymize_item_report?
+          # if teacher wants to show report anonymously . The order of students should be random
+          @students = @student_class_section.nil? ? @student_class.students : @student_class_section.students
+        else
+          @students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+        end
+        explanations = SelfExplanation.find_by_sql(["select problem_logs.assignment_id from self_explanations "+
+              "left outer join problem_logs on problem_logs.id = self_explanations.problem_log_id " +
+              "left outer join class_assignments on class_assignments.id = problem_logs.assignment_id "+
+              "where problem_logs.assignment_type = 'ClassAssignment' and class_assignments.student_class_id = ? " +
+              "order by problem_logs.start_time desc", @student_class.id])
+        @class_assignment_ids = Array.new
+        explanations.each do |explanation|
+          @class_assignment_ids << explanation.assignment_id unless @class_assignment_ids.include? explanation.assignment_id
+        end
+        
+        @class_assignments = ClassAssignment.find(@class_assignment_ids)
+        @class_assignment_id = (params[:assignment_id] || @class_assignment_ids.first).to_i
+        #when user switches the classes, finding the class asignment with same sequence
+        if @class_assignment_id > 0 and @class_assignments.find{|assignment| assignment.id == @class_assignment_id}.nil?
+          begin
+            seq_id = ClassAssignment.find(@class_assignment_id).sequence_id
+            class_assignment = @class_assignments.find{|assignment| assignment.sequence_id == seq_id }
+            @class_assignment_id = (class_assignment.nil? ? @class_assignment_ids.first : class_assignment.id).to_i
+          rescue ActiveRecord::RecordNotFound
+            set_flash :warning, "This class assignment doesn't exist."
+            redirect_to :controller => "folder",:action =>"index"  
+          end
+        end
+   
+          problem_logs = ProblemLog.find_by_sql(
+            "select problem_logs.*, answers.value, problems.position from problem_logs "+
+              "left outer join answers on answers.id = problem_logs.answer_id " +
+              "left outer join problems on problems.id = problem_logs.problem_id " +
+              "where problem_logs.assignment_type = 'ClassAssignment' and problem_logs.original = 1 and problem_logs.correct = 0 and problem_logs.assignment_id = #{@class_assignment_id} " +
+              "order by problem_logs.start_time")
+        @incorrect_problem_matrix = Hash.new
+        @problems = Array.new
+        @assistments = Hash.new
+        @problem_positions = Hash.new
+        problem_logs.each do |log|
+          @incorrect_problem_matrix[log.user_id] = Hash.new if @incorrect_problem_matrix[log.user_id].nil?
+          unless log.self_explanation.nil?
+            @incorrect_problem_matrix[log.user_id][log.problem_id]=log 
+            @problems << log.problem_id
+            @assistments[log.problem_id] =log.assistment_id 
+            @problem_positions[log.problem_id] = log.position
+          end
+        end
+        @ass = Assistment.find(@assistments.values)
+        @problems.uniq!
+      end
+    rescue ActiveRecord::RecordNotFound
+      set_flash :warning, "This class doesn't exist."
+      redirect_to :controller => "folder",:action =>"index"  
+    end   
+  end
+
+  def show_more_details
+    @student_class = StudentClass.find(params[:class_id], :include => :students)
+    @student_class_section = StudentClassSection.find(params[:class_section_id]) unless params[:class_section_id].blank?
+    @students = @student_class_section.nil? ? @student_class.students : @student_class_section.students
+    @user_ids = @students.collect{|student| student.user_id}
+    get_number_of_days_worked_and_problems_seen(@user_ids, params[:class_assignment_id].to_i)
+  end
+  
+  
+  def item_summary
+	begin
+      @assistment = Assistment.find(params[:assistment_id].to_i)
+      if @assistment.main_problems.size == 0
+        set_flash :warning, "This problem is not valid."
+        redirect_to :controller => "folder",:action =>"index" 
+        return
+      end
+      @main_problems = Hash.new
+      get_main_problem_with_scaffolds(@assistment.id)
+	  my_students = Array.new
+      current_user.teacher.student_classes.reject{|student_class| ! student_class.enabled?}.each do |student_class|
+        my_students << student_class.students.collect{|student| student.user_id}
+      end
+      my_students = my_students.flatten.uniq
+	  
+	  
+      item_record = ActiveRecord::Base.connection.execute(<<-EOS
+        select (problems.position-original) as position, correct, user_id, assignment_id, problem_id from problem_logs 
+        left outer join problems on problems.id=problem_id
+        where problem_logs.assistment_id=#{@assistment.id} and assignment_type ~* 'ClassAssignment' and correct is not null and end_time is not null
+		and user_id in (#{my_students.join(',')})
+        order by user_id,assignment_id,start_time
+        EOS
+      ).result
+      wrong_answers_logs = ActiveRecord::Base.connection.execute(<<-EOS
+          select goo.problem_id,goo.answer_text,goo.value,goo.percent,goo.incorrect_message,goo.answer_id from
+          (select foo.problem_id,foo.count,answer_text,answers.incorrect_message,answers.id as answer_id, value,wrong_per_problem.count as count1,foo.count*1.0/wrong_per_problem.count*1.0 as percent from (
+            select count(*) as count,answer_text,answer_id,problem_id
+            from problem_logs
+            where correct = 0 and first_action = 0 and problem_logs.assistment_id = #{@assistment.id}   and problem_logs.assignment_type = 'ClassAssignment' 
+			and user_id in (#{my_students.join(',')})
+            group by answer_text, answer_id,problem_id
+            having count(*)> 3
+            order by count desc)  as foo
+          left outer join  answers on (foo.answer_id = answers.id or foo.answer_text = answers.value) and foo.problem_id=answers.problem_id 
+          left outer join 
+            (select count(*) as count,problem_id
+            from problem_logs
+            where correct=0 and first_action=0 and problem_logs.assistment_id = #{@assistment.id} and problem_logs.assignment_type = 'ClassAssignment' 
+            and user_id in (#{my_students.join(',')})
+			group by problem_id
+            order by count desc) as wrong_per_problem on wrong_per_problem.problem_id=foo.problem_id
+          order by problem_id, foo.count desc)
+          as goo
+          where goo.percent >= 0.1
+        EOS
+      ).result
+      @common_wrong_answers = Hash.new
+      wrong_answers_logs.each do |log|
+        @common_wrong_answers[log[0].to_i] = Array.new if @common_wrong_answers[log[0].to_i].nil?
+        @common_wrong_answers[log[0].to_i] << log.slice(1..5)
+      end  
+      
+      #get current teacher's students info
+      
+      @number_of_problems = @main_problems.values[0].size
+      #build patterns
+      patterns = Array.new
+      if @number_of_problems > 1
+        sub_patterns = generate_pattern(@number_of_problems-1)
+        sub_patterns.each do |sub_pattern|
+          patterns << sub_pattern.insert(0,0)
+        end
+      else
+        patterns << [0]
+      end
+      correct_pattern = Array.new(@number_of_problems,-1)
+      correct_pattern[0] = 1
+      patterns << correct_pattern
+      
+      @result = Hash.new()
+      @result_my_students = Hash.new
+      i = 0
+      #data normalization
+      data = Hash.new
+      @problem_average = Hash.new
+      item_record.each do |record|
+        @problem_average[record[4].to_i] = Hash.new(0) if @problem_average[record[4].to_i].nil?
+        @problem_average[record[4].to_i]["total_done"] += 1 
+        @problem_average[record[4].to_i]["total_correct"] += record[1].to_i 
+        data[record[2].to_i] = Hash.new if data[record[2].to_i].nil?
+        data[record[2].to_i][record[3].to_i] = [0,false] if data[record[2].to_i][record[3].to_i].nil?
+        if record[0].to_i == 0 and record[1].to_i == 1
+          data[record[2].to_i][record[3].to_i][1] = true
+        end
+        data[record[2].to_i][record[3].to_i][0] += 1 
+      end
+      data.each_pair do |student, student_record|
+        student_record.each_pair do |assignment_id, assignment_record|
+          if !assignment_record[1]  and assignment_record[0] != @number_of_problems
+            item_record.delete_if{|x| x[2].to_i == student and x[3].to_i == assignment_id }
+          end
+        end
+      end
+      pattern = Array.new(@number_of_problems){-1} 
+      item_record.each do |record|
+        if record[0].to_i == 0 and record[1].to_i == 1
+          pattern = Array.new(@number_of_problems){-1}  
+          pattern[0] = 1
+          @result[pattern] = 0 if  @result[pattern].nil?
+          @result_my_students[pattern] = 0 if @result_my_students[pattern].nil? and my_students.include? record[2].to_i
+          @result[pattern] +=1
+          @result_my_students[pattern] += 1 if my_students.include? record[2].to_i
+          pattern = Array.new(@number_of_problems){-1}
+          i = 0
+          next 
+        end 
+        pattern[record[0].to_i] =  record[1].to_i
+        i+=1
+        if i == @number_of_problems
+          @result[pattern] = 0 if  @result[pattern].nil?
+          @result_my_students[pattern] = 0 if @result_my_students[pattern].nil? and my_students.include? record[2].to_i
+          @result[pattern]+=1
+          @result_my_students[pattern] += 1 if my_students.include? record[2].to_i
+          pattern = Array.new(@number_of_problems){-1} 
+          i = 0
+        end
+      end
+      @pattern_sum = Hash.new
+      @pattern_sum_my_students = Hash.new
+      patterns.each do |pattern|
+        @pattern_sum[pattern] = 0
+        @pattern_sum_my_students[pattern] = 0
+      end
+      @result.each_pair do |pattern, times|
+        @pattern_sum[pattern] = times unless  @pattern_sum[pattern].nil?
+      end
+      @result_my_students.each_pair do |pattern, times|
+        @pattern_sum_my_students[pattern] = times unless  @pattern_sum_my_students[pattern].nil?
+      end
+    rescue ActiveRecord::RecordNotFound
+      set_flash :warning, "This problem doesn't exist."
+      redirect_to :controller => "folder",:action =>"index"  
+    end
+  end
+
+  def item_summary_complete_data
+    begin
+      @assistment = Assistment.find(params[:assistment_id].to_i)
+      if @assistment.main_problems.size == 0
+        set_flash :warning, "This problem is not valid."
+        redirect_to :controller => "folder",:action =>"index" 
+        return
+      end
+      @main_problems = Hash.new
+      get_main_problem_with_scaffolds(@assistment.id)
+      item_record = ActiveRecord::Base.connection.execute(<<-EOS
+        select (problems.position-original) as position, correct, user_id, assignment_id, problem_id from problem_logs 
+        left outer join problems on problems.id=problem_id
+        where problem_logs.assistment_id=#{@assistment.id} and assignment_type ~* 'ClassAssignment' and correct is not null and end_time is not null
+        order by user_id,assignment_id,start_time
+        EOS
+      ).result
+      wrong_answers_logs = ActiveRecord::Base.connection.execute(<<-EOS
+          select goo.problem_id,goo.answer_text,goo.value,goo.percent,goo.incorrect_message,goo.answer_id from
+          (select foo.problem_id,foo.count,answer_text,answers.incorrect_message,answers.id as answer_id, value,wrong_per_problem.count as count1,foo.count*1.0/wrong_per_problem.count*1.0 as percent from (
+            select count(*) as count,answer_text,answer_id,problem_id
+            from problem_logs
+            where correct = 0 and first_action = 0 and problem_logs.assistment_id = #{@assistment.id}   and problem_logs.assignment_type = 'ClassAssignment' 
+            group by answer_text, answer_id,problem_id
+            having count(*)> 3
+            order by count desc)  as foo
+          left outer join  answers on (foo.answer_id = answers.id or foo.answer_text = answers.value) and foo.problem_id=answers.problem_id 
+          left outer join 
+            (select count(*) as count,problem_id
+            from problem_logs
+            where correct=0 and first_action=0 and problem_logs.assistment_id = #{@assistment.id} and problem_logs.assignment_type = 'ClassAssignment' 
+            group by problem_id
+            order by count desc) as wrong_per_problem on wrong_per_problem.problem_id=foo.problem_id
+          order by problem_id, foo.count desc)
+          as goo
+          where goo.percent >= 0.1
+        EOS
+      ).result
+      @common_wrong_answers = Hash.new
+      wrong_answers_logs.each do |log|
+        @common_wrong_answers[log[0].to_i] = Array.new if @common_wrong_answers[log[0].to_i].nil?
+        @common_wrong_answers[log[0].to_i] << log.slice(1..5)
+      end  
+      
+      #get current teacher's students info
+      my_students = Array.new
+      current_user.teacher.student_classes.each do |student_class|
+        my_students << student_class.students.collect{|student| student.user_id}
+      end
+      my_students = my_students.flatten.uniq
+      @number_of_problems = @main_problems.values[0].size
+      #build patterns
+      patterns = Array.new
+      if @number_of_problems > 1
+        sub_patterns = generate_pattern(@number_of_problems-1)
+        sub_patterns.each do |sub_pattern|
+          patterns << sub_pattern.insert(0,0)
+        end
+      else
+        patterns << [0]
+      end
+      correct_pattern = Array.new(@number_of_problems,-1)
+      correct_pattern[0] = 1
+      patterns << correct_pattern
+      
+      @result = Hash.new()
+      @result_my_students = Hash.new
+      i = 0
+      #data normalization
+      data = Hash.new
+      @problem_average = Hash.new
+      item_record.each do |record|
+        @problem_average[record[4].to_i] = Hash.new(0) if @problem_average[record[4].to_i].nil?
+        @problem_average[record[4].to_i]["total_done"] += 1 
+        @problem_average[record[4].to_i]["total_correct"] += record[1].to_i 
+        data[record[2].to_i] = Hash.new if data[record[2].to_i].nil?
+        data[record[2].to_i][record[3].to_i] = [0,false] if data[record[2].to_i][record[3].to_i].nil?
+        if record[0].to_i == 0 and record[1].to_i == 1
+          data[record[2].to_i][record[3].to_i][1] = true
+        end
+        data[record[2].to_i][record[3].to_i][0] += 1 
+      end
+      data.each_pair do |student, student_record|
+        student_record.each_pair do |assignment_id, assignment_record|
+          if !assignment_record[1]  and assignment_record[0] != @number_of_problems
+            item_record.delete_if{|x| x[2].to_i == student and x[3].to_i == assignment_id }
+          end
+        end
+      end
+      pattern = Array.new(@number_of_problems){-1} 
+      item_record.each do |record|
+        if record[0].to_i == 0 and record[1].to_i == 1
+          pattern = Array.new(@number_of_problems){-1}  
+          pattern[0] = 1
+          @result[pattern] = 0 if  @result[pattern].nil?
+          @result_my_students[pattern] = 0 if @result_my_students[pattern].nil? and my_students.include? record[2].to_i
+          @result[pattern] +=1
+          @result_my_students[pattern] += 1 if my_students.include? record[2].to_i
+          pattern = Array.new(@number_of_problems){-1}
+          i = 0
+          next 
+        end 
+        pattern[record[0].to_i] =  record[1].to_i
+        i+=1
+        if i == @number_of_problems
+          @result[pattern] = 0 if  @result[pattern].nil?
+          @result_my_students[pattern] = 0 if @result_my_students[pattern].nil? and my_students.include? record[2].to_i
+          @result[pattern]+=1
+          @result_my_students[pattern] += 1 if my_students.include? record[2].to_i
+          pattern = Array.new(@number_of_problems){-1} 
+          i = 0
+        end
+      end
+      @pattern_sum = Hash.new
+      @pattern_sum_my_students = Hash.new
+      patterns.each do |pattern|
+        @pattern_sum[pattern] = 0
+        @pattern_sum_my_students[pattern] = 0
+      end
+      @result.each_pair do |pattern, times|
+        @pattern_sum[pattern] = times unless  @pattern_sum[pattern].nil?
+      end
+      @result_my_students.each_pair do |pattern, times|
+        @pattern_sum_my_students[pattern] = times unless  @pattern_sum_my_students[pattern].nil?
+      end
+    rescue ActiveRecord::RecordNotFound
+      set_flash :warning, "This problem doesn't exist."
+      redirect_to :controller => "folder",:action =>"index"  
+    end
+  end
+  
+   
+   # DEFUNCT FUNCTION?
+  def item_level_with_scaffolding
+    begin
+	  @is_item_level = false
+      @student_class = StudentClass.find(params[:id], :include => :students)
+      @student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}
+	  unless @student_classes.include? @student_class
+        set_flash :warning, "You can not view other teachers' class!"
+        redirect_to :controller => "folder",:action =>"index"
+		return
+	  end
+      @student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+      @student_class_section = StudentClassSection.find(params[:section_id]) unless params[:section_id].blank?
+      #@students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+      if @student_class.anonymize_item_report?
+        # if teacher wants to show report anonymously . The order of students should be random
+        @students = @student_class_section.nil? ? @student_class.students : @student_class_section.students
+      else
+        @students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+      end
+      @class_assignment_id = (params[:assignment_id] || @student_class.last_active_assignment).to_i
+      @class_assignments = @student_class.class_assignments(true).collect { |a| a unless a.sequence_id.nil? }.compact
+      #when user switches the classes, finding the class asignment with same sequence
+      if @class_assignments.find{|assignment| assignment.id == @class_assignment_id}.nil?
+        begin
+          seq_id = ClassAssignment.find(@class_assignment_id).sequence_id
+          class_assignment = @class_assignments.find{|assignment| assignment.sequence_id == seq_id }
+          @class_assignment_id = (class_assignment.nil? ? @student_class.last_active_assignment : class_assignment.id).to_i
+        rescue ActiveRecord::RecordNotFound
+          set_flash :warning, "This class assignment doesn't exist."
+          redirect_to :controller => "folder",:action =>"index"  
+        end
+      end
+	  
+	  # This is for individual assignments
+	  @class_assignment = class_assignment
+	
+	  if @class_assignment.nil?
+		if @class_assignments.collect{|x| x.id}.include?(@class_assignment_id.to_i)
+			@class_assignment = ClassAssignment.find(@class_assignment_id.to_i)
+		end
+	  end
+	  
+	  
+	  
+	  @students = remove_not_assigned_users(@class_assignment, @students)
+	  @user_ids = @students.collect{|student| student.user_id}
+	  
+		
+	  
+      problem_logs = ProblemLog.find_by_sql(
+        "select l.*, a.value, p.position, p.problem_type_id, ass.assistment_type_id " +
+          "from problem_logs l " +
+          "left outer join problems p " + 
+          "on l.problem_id=p.id " +
+          "left outer join assistments ass " +
+          "on l.assistment_id=ass.id " +
+          "left outer join answers a " + 
+          "on l.answer_id=a.id " +
+          "where l.assignment_id=#{@class_assignment_id} and l.assignment_type =     'ClassAssignment' " +
+          "order by l.start_time")
+      hints_usage = ProblemLog.find_by_sql([
+          "select user_id,problem_id,assistment_id,sum(hint_count) as hint_count,sum(bottom_hint) as bottom_hint "+
+            "from problem_logs "+
+            "where assignment_id=? and problem_logs.assignment_type = 'ClassAssignment' "+
+            "group by user_id,problem_id,assistment_id "+
+            "order by user_id",@class_assignment_id])
+        
+      #delete the record for those students who are not in the class anymore
+      problem_logs.reject!{|x| x unless @students.collect{|y| y.user_id}.include? x.user_id}||problem_logs	
+      hints_usage.reject!{|x| x unless @students.collect{|y| y.user_id}.include? x.user_id}||hints_usage
+      @problems = Array.new
+      @assistments = Hash.new
+      @matrix = Hash.new
+      @student_average = Hash.new
+      @problem_average = Hash.new
+      @total_hint = Hash.new
+      @bottom_hint = Hash.new
+      @problem_positions = Hash.new
+      @help_requested = Hash.new(0)	
+      problem_logs.each do |log|
+		next if not @user_ids.include? log.user_id
+        @matrix[log.user_id] = Hash.new if @matrix[log.user_id].nil?
+        @matrix[log.user_id][log.problem_id]=log
+        @student_average[log.user_id] = Hash.new(0) if @student_average[log.user_id].nil?
+        @student_average[log.user_id]["total_done"] += 1 unless log.end_time.nil? or log.correct.nil? or log.original !=1
+        @student_average[log.user_id]["total_correct"] += log.correct unless log.correct.nil? or log.original !=1
+        @student_average[log.user_id]["ungraded_essay"] += 1 if log.correct.nil? and !log.answer_text.nil? and log.original == 1
+        @student_average[log.user_id]["graded_essay"] += 1 if !log.correct.nil? and log.problem_type_id == '8' and log.original == 1
+        @problem_average[log.problem_id] = Hash.new(0) if @problem_average[log.problem_id].nil?
+        @problem_average[log.problem_id]["total_done"] += 1 unless log.end_time.nil?
+        @problem_average[log.problem_id]["total_correct"] += log.correct unless log.correct.nil? 
+        @help_requested[log.problem_id]+=1 if log.first_action == 1 or log.first_action == 2
+        @problem_positions[log.problem_id] = log.position
+        @problems << log.problem_id if log.original == 1
+        @assistments[log.problem_id] =log.assistment_id 
+      end
+      
+      @ass = Assistment.find(@assistments.values)
+      @problems.uniq!
+      @main_problems = Hash.new
+      @assistments.values.uniq.each do |assistment|
+        get_main_problem_with_scaffolds(assistment)
+      end
+      hints_usage.each do |l|
+		next if not @user_ids.include? l.user_id
+        @total_hint[l.user_id] = 0 if @total_hint[l.user_id].nil?
+        @total_hint[l.user_id] += l.hint_count unless l.hint_count.nil?
+        @bottom_hint[l.user_id] = Hash.new if @bottom_hint[l.user_id].nil?
+        @bottom_hint[l.user_id][l.problem_id] = l.bottom_hint
+      end
+      #build common wrong answers
+      wrong_answers_logs = ActiveRecord::Base.connection.execute(<<-EOS
+          select goo.problem_id,goo.answer_text,goo.value,goo.percent from
+          (select foo.problem_id,foo.count,answer_text,value,wrong_per_problem.count as count1,foo.count*1.0/wrong_per_problem.count*1.0 as percent from (
+            select count(*) as count,answer_text,answer_id,problem_id
+            from problem_logs
+            where correct=0 and first_action=0 and problem_logs.assignment_id= #{@class_assignment_id}  and problem_logs.assignment_type = 'ClassAssignment' 
+            group by answer_text, answer_id,problem_id
+            having count(*)> 3
+            order by count desc)  as foo
+          left outer join  answers on foo.answer_id = answers.id
+          left outer join 
+            (select count(*) as count,problem_id
+            from problem_logs
+            where correct=0 and first_action=0 and problem_logs.assignment_id= #{@class_assignment_id} and problem_logs.assignment_type = 'ClassAssignment' 
+            group by problem_id
+            order by count desc) as wrong_per_problem on wrong_per_problem.problem_id=foo.problem_id
+          order by problem_id, foo.count desc)
+          as goo
+          where goo.percent >= 0.1
+        EOS
+      ).result
+      @common_wrong_answers = Hash.new
+      wrong_answers_logs.each do |log|
+        @common_wrong_answers[log[0].to_i] = Array.new if @common_wrong_answers[log[0].to_i].nil?
+        @common_wrong_answers[log[0].to_i] << log.slice(1..3)
+      end
+    rescue ActiveRecord::RecordNotFound
+      set_flash :warning, "This class doesn't exist."
+      redirect_to :controller => "folder",:action =>"index"  
+    end
+  end
+
+  #generates the student and problem average graphs
+  def graph
+    if !params[:data_to_plot].nil?
+		@axis_label = Array.new
+		@data_to_plot = Array.new
+		@problem_name = Array.new
+		@axis_label << params[:axis_label].split('/')
+		@data_to_plot << params[:data_to_plot].split('/').map(&:to_i)
+		@title = params[:title]
+		len = @axis_label[0].length
+		@data_type = params[:data_type]
+		if @data_type == "Problem"
+		@problem_name << params[:problem_name].split('/')
+		end
+		#sort the data by average
+		for count1 in (0..len-1)
+			temp1 = @data_to_plot[0][count1]
+			for count2 in (0..len-1)
+				temp2 = @data_to_plot[0][count2]
+				if (temp1<temp2)
+					@data_to_plot[0][count1],@data_to_plot[0][count2] = @data_to_plot[0][count2],@data_to_plot[0][count1]
+					@axis_label[0][count1],@axis_label[0][count2] = @axis_label[0][count2],@axis_label[0][count1]
+					if @data_type == "Problem"
+						@problem_name[0][count1],@problem_name[0][count2] = @problem_name[0][count2],@problem_name[0][count1]
+					end
+					temp1 = @data_to_plot[0][count1]
+				end
+			end
+		end
+		count = 0
+		#sort the sorted data by first name/problem number
+		for outer_count in (0..len-1)
+			for inner_count in (outer_count..len-1)
+				if (@data_to_plot[0][outer_count] == @data_to_plot[0][inner_count])
+					count = count + 1
+				else
+					break
+				end
+			end
+			temp_count = outer_count+count
+			if temp_count>len-1
+				temp_count= len-1
+			end
+			if count>0
+				for inner_count1 in (outer_count..temp_count-1)
+					if ((@axis_label[0][outer_count] <=> @axis_label[0][inner_count1]) == 1)
+						@axis_label[0][outer_count],@axis_label[0][inner_count1] = @axis_label[0][inner_count1],@axis_label[0][outer_count]
+						if @data_type == "Problem"
+							@problem_name[0][outer_count],@problem_name[0][inner_count1] = @problem_name[0][inner_count1],@problem_name[0][outer_count]
+						end
+					end
+				end
+			end
+			count = 0
+		end
+		#display the graph
+		render :template => 'teacher/report/graph', :type => :rjs, :layout => false
+    end
+  end
+  
+  def class_level_summary
+    begin
+      # get all classes for current teacher
+      @student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}
+      # get the class we want to see report
+      @student_class = StudentClass.find(params[:id])
+      # Get all sections for reported class
+      @student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+      unless params[:section_id].blank? 
+        # Get the specific section
+        # 1) First look in the array that we just got
+        # Take the first thing in the result array (returned by select), if empty it will be nil
+        @student_class_section = @student_class_sections.select{ |section| section.id == params[:section_id] }.first
+        # 2) If nil (we couldn't find section in our initial query), do a query
+        @student_class_section = ( StudentClassSection.find(params[:section_id])) if @student_class_section.nil?
+      end
+
+      unless @student_classes.include? @student_class
+        set_flash :warning, "You can not view other teachers' class!"
+        redirect_to :controller => "folder",:action =>"index"
+      else
+        # security check
+        @student_class = @student_classes.first if @student_classes.detect {|x| x.id==@student_class.id}.nil?
+        @student_classes.reject! {|student_class| student_class.disabled?} unless @student_class.disabled?
+        if @student_class.anonymize_item_report?
+          # if teacher wants to show report anonymously . The order of students should be random
+          @students = @student_class_section.nil? ? @student_class.students : @student_class_section.students
+        else
+          @students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+        end
+        
+        @class_assignments = @student_class.class_assignments(true).collect { |a| a unless a.sequence_id.nil? }.compact
+        #filter relearning assignments
+        @class_assignments.delete_if{|i| !i.spiral_assignment_id.nil? }
+		@class_assignments.reject! {|ca| ca.arrs?}
+		    @class_assignments.delete_if{|ca| !ca.originates_from_teacher? }
+        # get the id of the class assignment we want to see report
+        @class_assignment_id = params[:class_assignment_id].to_i || 0
+        @class_assignment = ClassAssignment.find_by_id(@class_assignment_id)
+        #when user switches the classes, finding the class asignment with same sequence
+        if @class_assignments.find{|assignment| assignment.id == @class_assignment_id}.nil?
+          @class_assignment_id = 0
+        end
+
+        if @class_assignment_id == 0
+          # for all assignments
+          # Note: class_assignments used to optimize query (faster than joins). 0 passed in to return empty array without
+          #       getting a syntax error in SQL
+          class_assignments = @student_class.class_assignments.collect{ |x| x.id } || 0
+		  @disable_link = "Proficiency"
+        else
+          class_assignments = @class_assignment_id || 0
+		  @disable_link = "proficiency_level_#{@class_assignment_id}"
+        end
+        # Get appropriate student log information
+        student_logs = ProblemLog.find_by_sql(
+          ["select pl.user_id, sum(pl.original) as original_done, sum(pl.original*pl.correct) as original_correct, count(*) as total_done, sum(pl.correct) as total_correct, sum(pl.hint_count) as hint_count "+
+              "from problem_logs as pl "+
+              "where pl.assignment_id in (?) and end_time is not null and pl.assignment_type = 'ClassAssignment' "+
+              "group by pl.user_id", class_assignments])
+
+        #delete the record for those students who are not in the class anymore
+        student_user_ids = @students.collect{|y| y.user_id}
+        student_logs.reject!{|x| x unless student_user_ids.include? x.user_id} || student_logs
+        @student_data = Hash.new
+        @hint_average = 0
+        @class_average = 0
+        @class_average_all = 0
+        @class_mcas = 0
+        @class_done_original = 0
+        @students_with_mcas = 0
+        student_logs.each do |student|
+          @student_data[student.user_id] = Hash.new
+          @student_data[student.user_id]["total_done"] = student.total_done.to_i
+          @student_data[student.user_id]["original_done"] = student.original_done.to_i
+          @student_data[student.user_id]["total_correct"] = student.total_correct.to_i
+          @student_data[student.user_id]["original_correct"] = student.original_correct.to_i
+          @student_data[student.user_id]["total_hints"] = student.hint_count
+          @student_data[student.user_id]["average"] = student.original_done.to_i == 0 ? 0 : student.original_correct.to_f*100/student.original_done.to_i
+          @student_data[student.user_id]["average_all"] = student.total_done.to_i == 0 ? 0 : student.total_correct.to_f*100/student.total_done.to_i
+          @student_data[student.user_id]["mcas"] = get_mcas_score student.original_done.to_i, student.original_correct.to_i
+          @student_data[student.user_id]["perf"] = get_student_level @student_data[student.user_id]["mcas"]
+          # calculate class average - hints
+          @hint_average += student.hint_count
+          @class_average += @student_data[student.user_id]["average"]
+          @class_average_all += @student_data[student.user_id]["average_all"]
+          @class_mcas += @student_data[student.user_id]["mcas"].to_i
+          @students_with_mcas += 1 if @student_data[student.user_id]["mcas"].to_i > 0
+          @class_done_original += student.original_done.to_i
+        end
+  
+        @hint_average = @hint_average/@student_data.keys.size unless @student_data.keys.size == 0
+        @class_average = @class_average/@student_data.keys.size unless @student_data.keys.size == 0
+        @class_average_all = @class_average_all/@student_data.keys.size unless @student_data.keys.size == 0
+        @class_mcas = @class_mcas/@students_with_mcas unless @students_with_mcas == 0
+        @class_done_original = @class_done_original/@student_data.keys.size unless @student_data.keys.size == 0
+        # calculate standard deviation
+        variance_average = 0
+        variance_mcas = 0
+        variance_done = 0
+        variance_hints = 0
+        @student_data.keys.each do |key|
+          variance_average += (@student_data[key]["average"]-@class_average)**2 unless @student_data[key]["average"].nil?
+          variance_mcas += (@student_data[key]["mcas"]-@class_mcas)**2 unless @student_data[key]["mcas"].nil? or @student_data[key]["mcas"] == 0
+          variance_done += (@student_data[key]["original_done"]-@class_done_original)**2 unless @student_data[key]["original_done"].nil?
+          variance_hints += (@student_data[key]["total_hints"]-@hint_average)**2 unless @student_data[key]["total_hints"].nil?
+        end
+
+        @standard_deviation = Hash.new
+        @standard_deviation["average"] = Math.sqrt(variance_average.to_f / (@student_data.keys.size - 1)) if @student_data.keys.size > 1
+        @standard_deviation["mcas"] = Math.sqrt(variance_mcas.to_f / (@students_with_mcas - 1)) if @students_with_mcas > 1
+        @standard_deviation["original_done"] = Math.sqrt(variance_done.to_f / (@student_data.keys.size - 1)) if @student_data.keys.size > 1
+        @standard_deviation["total_hints"] = Math.sqrt(variance_hints.to_f / (@student_data.keys.size - 1)) if @student_data.keys.size > 1
+        if params[:doctype]=="pdf"
+          send_data gen_pdf_class_summary, :filename => "class_summary.pdf", :type => "application/pdf" 
+        end
+      end
+    rescue ActiveRecord::RecordNotFound
+      set_flash :warning, "This class doesn't exist."
+      redirect_to :controller => "folder",:action =>"index"  
+    end		
+  end	
+  
+  def student_actions
+    begin
+      @student = Student.find(params[:student])
+      unless params[:assignment].nil?
+        @assignment = ClassAssignment.find(params[:assignment], :include => :student_class)  
+        @student_class = @assignment.student_class
+		@teacher_classes = get_teacher_classes()
+      end
+      @type = params[:type] if !params[:type].nil? and params[:type] =='day'
+      working_date_logs = ProblemLog.find_by_sql(["select distinct start_time from problem_logs where user_id=? order by start_time desc ", @student.user.id])
+      @working_dates = Array.new
+      working_date_logs.each do |log|
+	  if(!log['start_time'].nil?)
+        @working_dates << log['start_time'].strftime('%Y-%m-%d')
+	end
+      end
+      @working_dates = @working_dates.uniq
+      most_recent_date = @working_dates[0]
+      @start_date = params[:date].nil? ? most_recent_date : params[:date]
+      unless @student_class.nil? or (current_user.teacher.student_classes.include?(@student_class) and @student_class.students.include?(@student))
+        set_flash :warning, "This is not your student!"
+        redirect_to :controller => "folder",:action =>"index"
+      else
+        @assistments = Hash.new
+        if (@type == 'day' && !@start_date.nil?)
+          log = ProblemLog.find_by_sql([
+              "select pl.actions,pl.problem_id,pl.original,pl.end_time,pl.assistment_id, problems.position, pl.assignment_id, pl.id
+          from problem_logs pl
+          left outer join problems on problems.id = pl.problem_id
+          where pl.user_id=? and pl.start_time between ? and ? and pl.assignment_type = 'ClassAssignment'  
+          order by pl.start_time",
+              @student.user.id,@start_date, (Date.parse(@start_date)+1).strftime
+            ])
+        else
+  
+		if(!@assignment.nil?)
+			log = ProblemLog.find_by_sql([
+				"select pl.actions,pl.problem_id,pl.original,pl.end_time,pl.assistment_id, problems.position, pl.assignment_id, pl.id
+				from problem_logs pl
+				left outer join problems on problems.id = pl.problem_id
+				where pl.user_id=? and pl.assignment_id=? and pl.assignment_type = 'ClassAssignment'  
+				order by pl.start_time",
+				@student.user.id, @assignment.id
+			])
+		else
+			log = []
+		end
+	end
+        @action_log = Array.new
+        @problem_positions = Hash.new
+        log.each do |x|
+          log_per_pro = Array.new
+		  webpage_log = WebpageLog.find_by_problem_log_id(x["id"])
+		  unless webpage_log.nil?
+			attempt_num = webpage_log["attempt_count"]
+			hint_num = webpage_log["hint_count"]
+			webpage_action = Array.new
+			webpage_action << "webpage" << webpage_log["webpage_id"] <<webpage_log["time_survey_completed"] - webpage_log["time_url_first_visited"]
+			x["actions"].each_with_index {|action, index|
+				if hint_num == 0 and attempt_num == 0
+					next if action[0] == "start"
+					if action[0] == "resume"
+						next if action[1] < webpage_log["time_url_first_visited"].to_f*1000
+					end
+					x["actions"].insert(index, webpage_action)
+					# adjust the time-spent for the next action. 
+					unless(x["actions"][index+1].nil?)
+						unless (x["actions"][index+1][1].nil?)
+							x["actions"][index+1][1] -= webpage_log["time_survey_completed"] - webpage_log["time_url_first_visited"]
+						end
+					end
+					break
+				end
+				hint_num -= 1 if action[0] == "hint"
+				attempt_num -= 1 if action[0] == "answer"
+				
+			}
+		  end
+		  x["actions"].last << x["end_time"]
+          log_per_pro << x["actions"] << x["problem_id"] << x["original"] << x["assignment_id"]
+          @action_log << log_per_pro
+          @assistments[x.problem_id] = x.assistment_id
+          @problem_positions[x.problem_id] = x.position
+        end
+        @ass = Assistment.find(@assistments.values)
+        @action_log.each do |x|
+          #code to show the overlap time except for start and resume
+          x[0].each do |y|
+            next if y[0] == 'end'
+			begin
+				y[1] = Time.at(y[1]/1000) if y[0] == 'start' or y[0] == 'resume'
+			rescue
+				y[1] = Time.now if y[0] == 'start' or y[0] == 'resume'
+			end
+          end
+        end
+      end
+    rescue ActiveRecord::RecordNotFound
+      set_flash :warning, "Student or assignment doesn't exist."
+      redirect_to :controller => "folder",:action =>"index"  
+    end
+  end
+  
+  #duc's action report
+  # XXX # RAN # DEPRECATED (according to Yu)
+  # XXX # RAN # SECURITY VULNERABILITY
+  def student_log
+    @student = Student.find(params[:student])
+    @assignment = ClassAssignment.find(params[:assignment])
+    answer_log = AssignmentAnswer.find_by_sql([
+        "select a.*, p.scaffold_id " +
+          "from assignment_answers a, problems p  " +
+          "where a.user_id=? and a.class_assignment_id=? and a.problem_id=p.id",
+        @student.user.id, @assignment.id])
+    problem_log = ActionProblem.find_by_sql([
+        "select ap.*, ap.start_time as time, p.scaffold_id " +
+          "from action_problems ap, actions a, problems p  " +
+          "where a.user_id=? and a.class_assignment_id=? and a.id=ap.action_id and ap.problem_id=p.id",
+        @student.user.id, @assignment.id])
+    hint_log = ActionHint.find_by_sql([
+        "select ah.*, p.id as problem_id, p.scaffold_id " +
+          "from action_hints ah, action_problems ap, actions a, problems p  " +
+          "where a.user_id=? and a.class_assignment_id=? and ah.action_problem_id=ap.id and a.id=ap.action_id and ap.problem_id=p.id",
+        @student.user.id, @assignment.id])
+    @logs = answer_log + problem_log + hint_log
+    @logs = @logs.sort_by {|x| if x.class.to_s=="ActionProblem" then x.start_time else x.time end}
+  end
+
+  # This is for the Item/Skillbuilder ARRS Report
+  def mastery_status
+    if (@student_class = StudentClass.find(params[:id])).nil?
+      set_flash(:warning, 'Class doesn\'t exist.')
+      redirect_to(:controller => :folder, :action => :index)
+      return
+    elsif not current_user.teacher.student_classes.include?(@student_class)
+      set_flash(:warning, 'You can not view other teacher\'s class!')
+      redirect_to(:controller => :folder, :action => :index)
+      return
+    end
+    load_stock_comments
+    @student_classes = current_user.teacher.student_classes.sort! {|x,y| x.name <=> y.name}
+    
+    @show_last_worked_on = true if params[:dates] and params[:dates] == 'true' # Do not allow arbitrary values here
+    
+    @student_class_sections = @student_class.student_class_sections.sort! {|x,y| x.name <=> y.name}
+    @student_class_section = StudentClassSection.find(params[:section_id]) unless params[:section_id].blank?
+    
+    @student_class = @student_classes.first if @student_classes.detect {|student_class| student_class.id == @student_class.id}.nil?
+    @student_classes.reject! {|student_class| student_class.disabled?} unless @student_class.disabled?
+    
+	
+    #@students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+
+    # Limit 1000 is a hack to prevent users with 40k assignments from being unable to use the item report
+    ati = ''
+    valid_assignment_type_ids = AssignmentType.find_all_by_origin("Teacher").collect{|x| x[:id]}.join(', ')
+    ati = "or assignment_type_id in (#{valid_assignment_type_ids})" unless valid_assignment_type_ids.empty?
+    @class_assignments = ClassAssignment.find_by_sql("select t1.*, t3.name as sequence_name from class_assignments as t1
+        inner join sequences as t2 on t1.sequence_id = t2.id
+        inner join sections as t3 on t2.head_section_id = t3.id
+        where t1.student_class_id = #{@student_class.id}
+        and t1.spiral_assignment_id is null
+        and (assignment_type_id is null #{ati})
+        order by t1.position;
+      ")
+	@class_assignments.reject! {|ca| ca.arrs?}
+	
+    #@class_assignments = @student_class.class_assignments.collect {|class_assignment| class_assignment unless class_assignment.sequence_id.nil?}.compact
+
+    @class_assignment_id = (params[:assignment_id] || @student_class.last_active_assignment).to_i
+	
+	@disable_link = "item_level_#{@class_assignment_id}"
+
+    # When user switches the classes, find the class assignment with same sequence
+	if @class_assignments.find{|assignment| assignment.id == @class_assignment_id}.nil?
+		begin
+			seq_id = ClassAssignment.find(@class_assignment_id).sequence_id
+			class_assignment = @class_assignments.find{|assignment| assignment.sequence_id == seq_id }
+			@class_assignment_id = (class_assignment.nil? ? @student_class.last_active_assignment : class_assignment.id).to_i
+			@class_assignment = ClassAssignment.find(@class_assignment_id) if !class_assignment.nil?
+		rescue ActiveRecord::RecordNotFound
+			set_flash :warning, "This class assignment doesn't exist."
+			redirect_to :controller => "folder",:action =>"index"
+			return
+		end
+	else
+		begin
+		@class_assignment = ClassAssignment.find(@class_assignment_id)
+		rescue ActiveRecord::RecordNotFound
+			set_flash :warning, "This class assignment doesn't exist."
+			redirect_to :controller => "folder",:action =>"index"
+			return
+		end
+	end
+	if @class_assignment.nil? and @class_assignments.size > 0
+		@class_assignment = @class_assignments.first
+		@class_assignment_id = @class_assignment.id
+	end
+
+	if @class_assignment.nil?
+		set_flash :warning, "You do not have any assignments for #{@student_class.name}."
+		redirect_to :controller => "folder",:action =>"index"
+		return
+	end
+
+  if !@class_assignment.mastery_learning?
+    redirect_to(:action => "item_level",
+      :id => @student_class.id,
+      :assignment_id => @class_assignment_id,
+      :section_id => (@student_class_section.nil?)? nil:@student_class_section.id)
+    return
+  end
+
+
+  # get all of the students in the class,
+  # their full name or login if they do not have one
+  # how many days late they are on their assignment
+  if @student_class_section.nil?
+    @students = UserDetail.find_by_sql("select t3.*, t1.student_id, t5.parent_id,
+  CASE WHEN first_name IS NULL OR last_name IS NULL THEN login
+  WHEN middle_name IS NULL THEN (first_name || ' ' || last_name )
+  ELSE (first_name || ' ' || upper(substr(middle_name, 0, 2)) || ' ' || last_name ) END as names, t4.login from
+  enrollments as t1
+  inner join user_roles as t2 on t1.student_id = t2.id
+  inner join user_details as t3 using (user_id)
+  inner join users as t4 on t3.user_id = t4.id
+  left outer join student_parents as t5 on t1.student_id = t5.student_id
+  where t1.student_class_id = #{@student_class.id} and t1.enrollment_state_id = 1 order by upper(t3.last_name), middle_name , upper(t3.first_name), t4.login")
+  else
+    @students = UserDetail.find_by_sql("select t3.*, t1.student_id, t5.parent_id,
+  CASE WHEN first_name IS NULL OR last_name IS NULL THEN login
+  WHEN middle_name IS NULL THEN (first_name || ' ' || last_name )
+  ELSE (first_name || ' ' || upper(substr(middle_name, 0, 2)) || ' ' || last_name ) END as names, t4.login from
+  enrollments as t1
+  inner join user_roles as t2 on t1.student_id = t2.id
+  inner join user_details as t3 using (user_id)
+  inner join users as t4 on t3.user_id = t4.id
+  left outer join student_parents as t5 on t1.student_id = t5.student_id
+  where  t1.enrollment_state_id = 1 and t1.student_class_id = #{@student_class.id} and t1.student_class_section_id = #{@student_class_section.id} order by upper(t3.last_name), middle_name , upper(t3.first_name), t4.login")
+  end
+  if params[:show_anon_report].nil? then
+    #Anonymize link is not selected
+    @show_anon_report = @student_class.show_anonymous_report?
+  else
+    @show_anon_report = eval(params[:show_anon_report])
+  end
+
+  if @show_anon_report
+    @students = @students.sort_by{|x| rand(100)}
+  end
+
+  @assignment_logs = Hash.new
+  AssignmentLog.find(:all, :conditions => {:assignment_id => @class_assignment_id, :assignment_type => ClassAssignment.to_s}).each {|assignment_log| @assignment_logs[assignment_log.user_id] = assignment_log}
+
+  working_days = ActiveRecord::Base.connection.execute(<<-EOS
+    select user_id, count (distinct extract(doy from start_time)), count(distinct  case when original=1 then problem_id end), sum(case when original=1 then (end_time-start_time) end)
+    from problem_logs
+    where assignment_id=#{@class_assignment_id} and assignment_type ~* 'ClassAssignment'
+    group by user_id
+    order by user_id
+    EOS
+  ).result
+  @working_days = Hash.new
+  @working_minutes = Hash.new
+  @main_problems_seen = Hash.new
+  working_days.each do |days|
+    @working_days[days[0].to_i] = days[1]
+    @working_minutes[days[0].to_i] = days[3]
+    @main_problems_seen[days[0].to_i] = days[2]
+  end
+
+  # stop it from throwing null errors if we do not have the fields in the parameters
+  # field of the section table
+
+  if @class_assignment.sequence.mastery_learning?
+    if  @class_assignment.sequence.mastery_parameters.nil?
+      begin
+        @consecutive_answers = Section.find_by_id(Sequence.find_by_id(@class_assignment.sequence_id).head_section_id).class::SECTION_VARIABLES["ConsecutiveAnswers"][:default]
+        @mastered_prior = Section.find_by_id(Sequence.find_by_id(@class_assignment.sequence_id).head_section_id).class::SECTION_VARIABLES["PriorKnowledge"][:default]
+        @first_day_limit = Section.find_by_id(Sequence.find_by_id(@class_assignment.sequence_id).head_section_id).class::SECTION_VARIABLES["MaxAssistmentsFirstDay"][:default]
+      end
+    else
+      begin
+        if @class_assignment.sequence.mastery_parameters['ConsecutiveAnswers'].nil?
+          @consecutive_answers = Section.find_by_id(Sequence.find_by_id(@class_assignment.sequence_id).head_section_id).class::SECTION_VARIABLES["ConsecutiveAnswers"][:default]
+        else
+          @consecutive_answers = @class_assignment.sequence.mastery_parameters['ConsecutiveAnswers']
+        end
+
+        if @class_assignment.sequence.mastery_parameters['PriorKnowledge'].nil?
+          @mastered_prior = Section.find_by_id(Sequence.find_by_id(@class_assignment.sequence_id).head_section_id).class::SECTION_VARIABLES["PriorKnowledge"][:default]
+        else
+          @mastered_prior =@class_assignment.sequence.mastery_parameters['PriorKnowledge']
+        end
+
+        if @class_assignment.sequence.mastery_parameters['MaxAssistmentsFirstDay'].nil?
+          @first_day_limit = Section.find_by_id(Sequence.find_by_id(@class_assignment.sequence_id).head_section_id).class::SECTION_VARIABLES["MaxAssistmentsFirstDay"][:default]
+        else
+          @first_day_limit = @class_assignment.sequence.mastery_parameters['MaxAssistmentsFirstDay']
+        end
+
+      end
+    end
+  else
+    @consecutive_answers = 0
+    @mastered_prior = 0
+    @first_day_limit = 0
+  end
+  @students = remove_not_assigned_users(@class_assignment, @students)
+
+  respond_to do |format|
+    format.html
+    format.js
+  end
+end
+  
+  # DEFUNCT FUNCTION?
+  # this report is where we tell how many assignments have been completed by students
+  def assignments_completion
+    student_class_id = params[:id]
+    if (@student_class = StudentClass.find(student_class_id)).nil?
+      set_flash(:warning, 'Class doesn\'t exist.')
+      redirect_to(:controller => :folder, :action => :index)
+      return
+    elsif not current_user.teacher.student_classes.include?(@student_class)
+      set_flash(:warning, 'You can not view other teacher\'s class!')
+      redirect_to(:controller => :folder, :action => :index)
+      return
+    end
+    @student_classes = current_user.teacher.student_classes.sort! {|x,y| x.name <=> y.name}
+    @student_class_sections = @student_class.student_class_sections.sort! {|x,y| x.name <=> y.name}
+    @student_class_section = StudentClassSection.find(params[:section_id]) unless params[:section_id].blank?
+    
+    @student_class = @student_classes.first if @student_classes.detect {|student_class| student_class.id == @student_class.id}.nil?
+    @student_classes.reject! {|student_class| student_class.disabled?} unless @student_class.disabled?
+    students = @student_class_section.nil? ? @student_class.students : @student_class_section.students
+    student_user_ids = "("
+    students.each {|a| student_user_ids += a.user_id.to_s + ","}
+    student_user_ids += "-1)"
+    completion_records = ActiveRecord::Base.connection.execute(<<-EOS
+      select assignment_id,date(end_time),count(*) as number_of_students from assignment_logs 
+      left outer join class_assignments on class_assignments.id = assignment_logs.assignment_id and assignment_logs.assignment_type = 'ClassAssignment'
+      where class_assignments.student_class_id = #{student_class_id} and end_time is not null and user_id in #{student_user_ids}
+      group by assignment_id,date
+      order by assignment_id 
+      EOS
+    ).result
+    @dates = Hash.new
+    #select mode of completion day for each assignment
+    completion_records.each do |record|
+      if @dates[record[0].to_i].nil?
+        @dates[record[0].to_i] = record 
+      else
+        @dates[record[0].to_i] = record if record[2].to_i >  @dates[record[0].to_i][2].to_i
+      end
+    end
+    @assignments = ClassAssignment.find(@dates.keys,:order => "position")
+  end
+  
+  def review_assistments
+    if (@student_class = StudentClass.find(params[:id])).nil?
+      set_flash(:warning, 'Class doesn\'t exist.')
+      redirect_to(:controller => :folder, :action => :index)
+      return
+    elsif not current_user.teacher.student_classes.include?(@student_class)
+      set_flash(:warning, 'You can not view other teacher\'s class!')
+      redirect_to(:controller => :folder, :action => :index)
+      return
+    end
+    
+    @student_classes = current_user.teacher.student_classes.sort! {|x,y| x.name <=> y.name}
+    
+    @student_class_sections = @student_class.student_class_sections.sort! {|x,y| x.name <=> y.name}
+    @student_class_section = StudentClassSection.find(params[:section_id]) unless params[:section_id].blank?
+    
+    @student_class = @student_classes.first if @student_classes.detect {|student_class| student_class.id == @student_class.id}.nil?
+    @student_classes.reject! {|student_class| student_class.disabled?} unless @student_class.disabled?
+    
+    if @student_class.anonymize_item_report?
+      # if teacher wants to show report anonymously . The order of students should be random
+      @students = @student_class_section.nil? ? @student_class.students : @student_class_section.students
+    else
+      @students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+    end
+
+    @start_date = params[:date].nil? ? (Time.now-7.days).strftime("%Y-%m-%d") : "#{params[:date][:year]}-#{params[:date][:month]}-#{params[:date][:day]}"
+    @end_date = params[:date].nil? ? (Time.now).strftime("%Y-%m-%d") : "#{params[:end_date][:year]}-#{params[:end_date][:month]}-#{params[:end_date][:day]}"
+    # use the day after @end_date in query because in postgresql 'between .. and ..' operator gives us [...)
+    end_date = Date.new(@end_date.split('-')[0].to_i,@end_date.split('-')[1].to_i,@end_date.split('-')[2].to_i) + 1
+    review_assistments_records = ActiveRecord::Base.connection.execute(<<-EOS
+      select review_logs.user_id,review_logs.assistment_id,date_part('year', problem_logs.start_time)||'-'||date_part('month', problem_logs.start_time)||'-'||date_part('day', problem_logs.start_time),date_part('year', problem_logs.end_time)||'-'||date_part('month', problem_logs.end_time)||'-'||date_part('day', problem_logs.end_time),problem_logs.correct, skills.name from review_logs
+      left outer join problem_logs on review_logs.problem_log_id = problem_logs.id
+      left outer join skills on skills.id = review_logs.skill_id
+      where problem_logs.assignment_id = #{@student_class.id} and problem_logs.assignment_type ~* 'ReviewAssignment' and problem_logs.start_time between '#{@start_date}' and '#{end_date}'
+      EOS
+    ).result
+    @review_average = Hash.new
+    @days = Array.new
+    review_assistments_records.each do |record|
+      @review_average[record[0].to_i] ||= Hash.new()
+      @days << record[3] unless @days.include? record[3]
+      @review_average[record[0].to_i][record[3]] ||= Hash.new(0)
+      @review_average[record[0].to_i][record[3]]["done"] += 1 unless record[3].nil?
+      @review_average[record[0].to_i][record[3]]["correct"] += record[4].to_f unless record[4].nil?
+      @review_average[record[0].to_i][record[3]]["assistment_with_skill"] = Array.new if @review_average[record[0].to_i][record[3]]["assistment_with_skill"] == 0
+      @review_average[record[0].to_i][record[3]]["assistment_with_skill"] << [record[1], record[5]]
+    end
+  
+  end
+  
+  def get_student_class_sections
+    @student_class_sections = StudentClass.find(params[:id]).student_class_sections.sort! {|x,y| x.name <=> y.name}
+  end
+
+
+  # The unfinished assignments report
+  def unfinished_assignments
+    @filters = params[:filter]
+    @disable_link = "Unfinished Assignments Report"
+    if(!params[:commit].nil?)
+      @generate_report = true
+    end
+
+    
+    if(@filters.nil?)
+      @filters = Hash.new
+      @filters['no_due_date'] = "0"
+      @filters['due_date'] = "1"
+      @filters['due_radio'] = 'all'
+      @filters['no_due_radio'] = 'all'
+      @filters['mastery_problems'] = "1"
+      @filters['before_date'] = 2.years.from_now.to_date
+      @filters['after_date'] = 2.years.ago.to_date
+    else
+      if(@filters['due_radio'].nil?)
+        @filters['due_radio'] = @filters['due_radio_remember']
+      end
+      #BEFOREDATE
+      begin
+        if(params[:filter][:before_date].nil?)
+          @filters['before_date'] = Date.civil(params[:before_date][:year].to_i,params[:before_date][:month].to_i,params[:before_date][:day].to_i)
+        else
+          @filters['before_date'] = params[:filter][:before_date].to_date
+        end
+      rescue
+        @generate_report = nil
+        @filters['before_date'] = 2.years.from_now.to_date
+        @filters['after_date'] = 2.years.ago.to_date
+        flash.now[:warning]= "Invalid Date: #{params[:before_date][:month]}/#{params[:before_date][:day]}/#{params[:before_date][:year]}"
+      end
+      #ENDBEFOREDATE
+
+      #AFTERDATE
+      begin
+        if(params[:filter][:after_date].nil?)
+          @filters['after_date'] = Date.civil(params[:after_date][:year].to_i,params[:after_date][:month].to_i,params[:after_date][:day].to_i)
+        else
+          @filters['after_date'] = params[:filter][:after_date].to_date
+        end
+      rescue
+        @generate_report = nil
+        @filters['before_date'] = 2.years.from_now.to_date
+        @filters['after_date'] = 2.years.ago.to_date
+        flash.now[:warning]= "Invalid Date: #{params[:after_date][:month]}/#{params[:after_date][:day]}/#{params[:after_date][:year]}"
+      end
+      #ENDAFTERDATE
+      if(@filters['after_date'] > @filters['before_date'])
+        @generate_report = nil
+        flash.now[:warning]= "Start date is later than end date."
+      end
+    end
+
+    @checked_students = params[:checked_students]
+    @checked_students_parent = params[:checked_students_parent]
+    @student_class = StudentClass.find_by_id(params[:id])#, :include => {:class_assignments => {:sequence => :base_section}}, :order => :position)
+    class_assignments = @student_class.class_assignments
+    class_assignments.delete_if{|ca| !ca.originates_from_teacher? }
+    @student_class_sections = @student_class.student_class_sections.sort!{|x,y| x.name <=> y.name}
+    @student_class_section = StudentClassSection.find(params[:section_id]) unless params[:section_id].blank?
+    @student_classes = current_user.teacher.student_classes.sort!{|x,y| x.name <=> y.name}
+    unless @student_classes.include? @student_class
+      set_flash :warning, "You can not view other teachers' class!"
+      redirect_to :controller => "folder",:action =>"index"
+    else
+      @student_classes.reject! {|student_class| student_class.disabled?} unless @student_class.disabled?
+      if @student_class.anonymize_item_report?
+        # if teacher wants to show report anonymously . The order of students should be random
+        @students = @student_class_section.nil? ? @student_class.students : @student_class_section.students
+      else
+        @students = @student_class_section.nil? ? @student_class.get_students_by_last_name : @student_class_section.get_students_by_last_name
+      end
+      @user_ids = @students.collect{|student| student.user_id}
+
+      @matrix = Hash.new
+    end
+
+    if(!@generate_report)
+      return #We don't want to generate the report, so exit early.
+    end
+    
+    completed_assignments = Student.find_by_sql("select t1.user_id, t2.student_id, t3.assignment_id, t3.end_time
+from user_roles as t1
+left outer join enrollments as t2 on t1.id = t2.student_id
+left outer join assignment_logs as t3  on t1.user_id = t3.user_id
+where t2.student_class_id = #{@student_class.id}
+#{("and t2.student_class_section_id = " + @student_class_section.id.to_s) unless @student_class_section.nil?}
+and t3.end_time IS NOT NULL
+and (t3.assignment_id in  (select id from class_assignments where student_class_id = #{@student_class.id}))
+order by t1.user_id, t3.assignment_id")
+
+ individual_assignments = IndividualAssignment.find(:all, :conditions => "student_class_id = #{@student_class.id}")
+   
+    #add in check if assignment hasnt been started (no log)
+    #log list will be null if they havent started anything
+    @students.each do |student|
+      unfinished_assignments = Array.new
+
+      student_completed = completed_assignments.select{|ca| ca.student_id.to_i == student.id}
+      student_completed_ids = student_completed.collect{|ca| ca.assignment_id.to_i}
+      student_individual_assignments = individual_assignments.select{|ca| ca.student_id.to_i == student.id}
+      student_individual_assignment_ids = student_individual_assignments.collect{|ca| ca.assignment_id.to_i}
+
+      class_assignments.each do | assignment|
+        if(!student_completed_ids.include?(assignment.id.to_i) and assignment.spiral_assignment.nil?)
+          
+          #Not assigned to student
+          assignment = nil if (assignment.individual? && !student_individual_assignment_ids.include?(assignment.id.to_i))
+
+
+          #Do filters
+
+          #Only assignments with a due date
+          assignment = nil if(assignment != nil && @filters['due_date'] == '1' && @filters['no_due_date'] == '0' && assignment.due_date.nil?)
+          #Only assignments with no due date
+          assignment = nil if(assignment != nil && @filters['due_date'] == '0' && @filters['no_due_date'] == '1' && !assignment.due_date.nil?)
+          #No assignments
+          assignment = nil if(@filters['due_date'] == '0' && @filters['no_due_date'] == '0')
+          #Assignment is an unwanted mastery set
+          if(!assignment.nil? && @filters['mastery_problems'] == '0')
+            assignment = nil if(assignment.mastery_learning?)
+          end
+
+          if(@filters['due_date'] == '1' && !assignment.nil? && !assignment.due_date.nil?)
+            time_difference = Time.now - assignment.due_date.to_time
+            #Only assignments past due date
+            assignment = nil if(@filters['due_radio'] == 'late' && (time_difference < 0))
+            #Only assignments before the due date
+            assignment = nil if(@filters['due_radio'] == 'upcoming' &&!assignment.nil? && (time_difference > 0))
+          
+            assignment_due_date_time = assignment.due_date.to_time unless assignment.nil?
+            #Only due after this date
+            assignment = nil if(!assignment.nil? && (assignment_due_date_time - @filters['after_date'].to_time < 0))
+            #Only due before this date
+            assignment = nil if(!assignment.nil? && (assignment_due_date_time - @filters['before_date'].to_time > 0))
+          end
+          #End filters
+          unfinished_assignments << assignment unless assignment.nil?
+          unfinished_assignments.reject! {|ca| ca.arrs?}
+        end
+        
+      end
+      @matrix[student] = unfinished_assignments
+
+    end
+    if params[:commit].to_s.include?("Send")
+      send_unfinished_assignment_report
+      redirect_to :controller => "report",:action => "unfinished_assignments", :commit => true, :id => params[:id]
+    end
+    if params[:commit].to_s.include?("Download")
+      send_data gen_pdf_unfinished_assignment_report, :filename => "#{@student_class.name}-Unfinished Assignment Report.pdf", :type => "application/pdf"
+    end
+  end
+  
+     ## Included to handle the toggling of anonymous mastery reports
+
+  def toggle_anonymous_mastery_reports
+    params[:show_anon_report] = !eval(params[:show_anon_report])
+    mastery_completion_report 
+    @show_anon_report = params[:show_anon_report]
+  end
+  
+  def create_new_ps
+    if params[:selected_as]
+      create_sequence_by_asID(params[:selected_as].split(',').map{|s| s.to_i}, params[:text_new_ps])
+    else
+      create_sequence_by_asID(params[:assistment_ids].map{|s| s.to_i}, params[:sequence_name])
+    end
+    flash[:notice] = "The problem set with id #{@seq_id} has been created."
+  end
+
+  
+  private
+
+  def get_number_of_days_worked_and_problems_seen(users, class_assignment_id)
+    user_ids = '(' << (users.push('-1')).join(',') << ')'
+    working_days = ActiveRecord::Base.connection.execute(<<-EOS
+      select user_id,count (distinct extract(doy from start_time)), count(distinct  case when original=1 then problem_id end), sum(case when ((extract(day from end_time) = extract(day from start_time)) and (end_time>start_time) and (end_time-start_time<'00:03:00')) then (end_time-start_time) else (interval '00:03:00') end )
+      from problem_logs
+      where assignment_id=#{class_assignment_id} and assignment_type ~* 'ClassAssignment' and user_id in #{user_ids}
+      group by user_id
+      order by user_id
+    EOS
+    ).result
+    @working_minutes = Hash.new
+    @main_problems_seen = Hash.new
+    working_days.each do |days|
+      @working_minutes[days[0].to_i] = days[3]
+      @main_problems_seen[days[0].to_i] = days[2]
+    end
+  end
+  
+  def gen_excel_mastery_completion
+    # we need to get what section students are in
+	student_section = Hash.new
+	Enrollment.find_by_sql( "select t1.*, t2.name as section_name from enrollments as t1
+		left outer join student_class_sections as t2 on t1.student_class_section_id = t2.id").each do |enrollment|
+		student_section[enrollment.student_id] = enrollment.section_name
+	end
+	
+    report = StringIO.new
+    CSV::Writer.generate(report, ',') do |csv| 
+	  csv << ['last_name','first_name','middle_name','class section', 'number completed', 'number started', 'number started and completed']
+      @students.each do |student| 
+		section = student_section[student.id] || ''
+        my_array = [student.last_name,student.first_name, student.middle_name, section]
+        log = @my_results[student.user_id] 
+		if log.nil? 
+			my_array = my_array << 0
+			my_array = my_array << 0
+			my_array = my_array << 0
+		else
+			my_array = my_array << log[1].to_i
+			my_array = my_array << log[2].to_i
+			my_array = my_array << log[3].to_i
+		end
+		csv << my_array
+      end 
+	end
+	report.rewind
+    report.read
+  end
+  
+  
+  def gen_excel_item_level
+    report = StringIO.new
+    CSV::Writer.generate(report, ',') do |csv| 
+      csv << ['Assignment Name: ' + ClassAssignment.find(@class_assignment_id).name]
+
+      students_by_section = Hash.new
+      @student_class_sections.each{|sec|
+        students_by_section[sec.name] = Array.new
+      }
+
+      @students.each{|s|
+        section_name = @student_class.enrollments.select{|e| e.student == s}.first.student_class_section.name
+        students_by_section[section_name] << s
+      }
+
+      assistments = Array.new
+      assistments = ['StudentName', 'Average Percent Correct']
+      class_average = Array.new
+      class_average = ['Class Average',get_class_average]
+      students_assistments = Hash.new
+      unless @problems.size == 0
+        @problems.each do |problem|
+          assistment_id = @assistments[problem].to_s
+          assistment = @ass.find{|assistment| assistment.id == @assistments[problem]} 
+          if assistment.main_problems.size == 1
+            assistments << '' + Sequence.encode_id(assistment_id, 'PR')
+            assistments << ' '
+          else
+            assistments << '' + Sequence.encode_id(assistment_id, 'PR') + ' MP:' + @problem_positions[problem].to_s
+            assistments << ' '
+          end
+          class_average << get_problem_average(problem)
+          class_average << ' '
+
+          students_by_section.each do |section, students|
+            students.each do |student|
+              students_assistments[student] = Array.new if students_assistments[student].nil?
+              student_log = get_log(student, problem)
+              unless student_log.nil? || student_log.end_time.nil?
+				# Print a rational number for graded essays or an integer 1/0 otherwise
+				if (Problem.find(problem)["problem_type_id"].to_i == 8)
+					students_assistments[student] << student_log.correct.to_f.to_s
+				else
+					students_assistments[student] << student_log.correct.to_i.to_s
+				end
+                answer_text = get_student_answer_text(student, problem)
+                unless answer_text.nil? or answer_text == ''
+                  students_assistments[student] << answer_text
+                else
+                  students_assistments[student] << ' '
+                end
+              else
+                students_assistments[student] << ' '
+                students_assistments[student] << ' '
+              end
+            end
+          end
+        end
+        csv << assistments
+        csv << class_average
+
+        students_by_section.each do |section, students|
+          if (!students.empty?)
+             csv << ["#{section}"]
+          end
+          
+          if @student_class.anonymize_item_report?
+            students.each do |student|
+              
+              students_assistments[student].insert(0, "XXXXX")
+              students_assistments[student].insert(1, get_student_average(student))
+              csv << students_assistments[student]
+            end
+          else
+             students.each do |student|
+              students_assistments[student].insert(0, student.name.gsub(/\n/, ' '))
+              students_assistments[student].insert(1, get_student_average(student))
+              csv << students_assistments[student]
+            end
+          end
+        end
+      end
+    end
+    report.rewind
+    report.read
+	
+  end
+
+  
+  # This is dumping the assignment level report out to a csv file
+  # :student_class_id	The id of the student class
+  # :section_id		The id of the section if applicable
+  # :include_spiral "true" if we want to include relearning assingments
+  # We need to make it so that we have an array and then append that on, and it generates a new line
+  def gen_excel_assignment_level
+
+	# open up the CSV file and output
+  	report = StringIO.new
+	CSV::Writer.generate(report, ',') do |csv|
+	my_array = ["Last name,", "First name", "Section"]
+	@assignments.each do |assignment|
+		name = assignment.name.gsub(',',"\;")
+		my_array = my_array << name
+	end
+	csv << my_array
+	
+	# now we do the average
+	my_array = ['Assignment Avg', '', '']
+	@assignments.each do |assignment|
+		my_array = my_array << "#{@class_average[assignment.id]['average']}%"
+	end
+	csv << my_array
+	
+	# now we see how each student did
+	@show_students.each do |student|
+		#Find the section name that this student is in. FASTER THAN THE PREVIOUS METHOD OF GRABBING EVERY ENROLLMENT ON THE PLANET
+		section = @student_class.student_class_sections.select{|sec| sec.students.map{|x| x.id}.include?(student.id)}.first.name
+		my_array = [student.last_name, student.first_name,section]
+		@assignments.each do |assignment|
+			val = get_student_assignment_average(student, assignment)
+			my_array = my_array << val
+		end
+		csv << my_array
+	end
+	end
+	report.rewind
+    report.read
+  end
+  
+  
+  # This is dumping the individual level report out to a csv file
+  def gen_excel_individual_level
+
+	# open up the CSV file and output
+  	report = StringIO.new
+	CSV::Writer.generate(report, ',') do |csv|
+		my_array = ["#{@student_user.user_detail.first_name} #{@student_user.user_detail.last_name}"]
+		csv << my_array
+		
+		my_array = ["Assignment", "Completion Status", "Grade", "Last Worked On", "Type Of Assignment"]
+		csv << my_array
+		
+		my_array = []
+		@assignments.each do |assignment|
+			my_array = []
+			current_hash = @student_info[assignment.id] 
+			if assignment.position == 0 
+				my_array << assignment.name(:short => true)
+			else 
+				my_array << assignment.name
+			end 
+			my_array << current_hash["status"]
+			my_array << "#{current_hash["correct"] || 0}/#{current_hash["done"] || 0} - #{current_hash["percent"] || "0%"}"
+			my_array << current_hash["last_worked_on"]
+			my_array << current_hash["type_of_assignment"]
+			csv << my_array
+		end
+	end
+	report.rewind
+    report.read
+  end
+  
+  def gen_excel_item_level_with_times
+    report = StringIO.new
+    CSV::Writer.generate(report, ',') do |csv| 
+      csv << ['Assisngment Name: ' + ClassAssignment.find(@class_assignment_id).name]
+
+      students_by_section = Hash.new
+      @student_class_sections.each{|sec|
+        students_by_section[sec.name] = Array.new
+      }
+
+      @students.each{|s|
+        section_name = @student_class.enrollments.select{|e| e.student == s}.first.student_class_section.name
+        students_by_section[section_name] << s
+      }
+
+      assistments = Array.new
+      assistments = ['StudentName', 'Average Percent Correct']
+      class_average = Array.new
+      class_average = ['Class Average', get_class_average]           
+      students_assistments = Hash.new
+      unless @problems.size == 0
+        @problems.each do |problem|
+          assistment_id = @assistments[problem].to_s
+          assistment = @ass.find{|assistment| assistment.id == @assistments[problem]} 
+          if assistment.main_problems.size == 1
+            assistments << '' + Sequence.encode_id(assistment_id, 'PR')
+          else
+            assistments << '' + Sequence.encode_id(assistment_id, 'PR') + ' MP:' + @problem_positions[problem].to_s
+          end
+          5.times { |i| assistments << ' ' }
+          
+          class_average << 'Correctness' << 'ActualAnswer' << 'StartTime' << 'EndTime' << 'FirstResponseTime' << 'OverlapTime'
+
+
+          students_by_section.each do |section, students|
+
+            students.each do |student|
+              students_assistments[student] = Array.new if students_assistments[student].nil?
+              student_log = get_log(student, problem)
+              unless student_log.nil? || student_log.end_time.nil?
+                students_assistments[student] << student_log.correct.to_i.to_s
+                answer_text = get_student_answer_text(student, problem)
+                unless answer_text.nil? or answer_text == ''
+                  students_assistments[student] << answer_text
+                else
+                  students_assistments[student] << ' '
+                end
+                student_times = get_student_times(student, problem)
+                4.times { |i| students_assistments[student] << student_times[i] }
+              else
+                6.times { |i| students_assistments[student] << ' ' }
+              end
+            end
+          end
+        end
+        csv << assistments
+        csv << class_average
+
+        students_by_section.each do |section, students|
+          if (!students.empty?)
+            csv << ["#{section}"]
+          end
+          
+          if @student_class.anonymize_item_report?
+            students.each do |student|
+              students_assistments[student].insert(0, "XXXXX")
+              students_assistments[student].insert(1, get_student_average(student))
+              csv << students_assistments[student]
+            end
+          else
+            students.each do |student|
+              students_assistments[student].insert(0, student.name.gsub(/\n/, ' '))
+              students_assistments[student].insert(1, get_student_average(student))
+              csv << students_assistments[student]
+            end
+          end
+        end
+      end
+    end
+    report.rewind
+    report.read
+  end
+
+  def send_unfinished_assignment_report
+    batch = nil
+    recip_arr = @matrix.select { |student_assignment| @checked_students_parent[student_assignment[0].id.to_s] == '1' }
+    recip_arr.each do |student_assignment|
+      body = ""
+      student_assignment[1].each do |assignment|
+        body += assignment.name + "<BR>"
+      end
+
+      student_assignment[0].parents.each do |parent|
+        parent_user=UserRole.find(:first, :conditions => ["id = ?", parent.id])
+        @recip = parent_user[:user_id]
+        
+        message = Message.create(
+          :subject => "Reminder: Unfinished Assignments",
+          :body => body,
+          :created => Time.now,
+          :sender_id => current_user.id,
+          :recipient_id => @recip,
+          :viewed => false,
+          :batch => nil,
+          :recipient_scope => 'user'
+        )
+
+        if batch.nil?
+          batch = message.id
+        end
+
+        message.batch = batch
+        message.save!
+
+        # Email notification for users who have it turned it on
+
+        begin
+          user = User.find(student_assignment[0].user.id)
+          UserNotifier::deliver_message_alert(user, message) if user.user_detail.email_notification
+        rescue
+          set_flash :warning, "Email not sent"
+        end
+      end
+
+		end
+
+    # Notify the user
+    set_flash :notice, "Message sent"
+  end
+	
+  def gen_pdf_unfinished_assignment_report
+    x1 = 120
+    x2 = 140
+    x3 = 160
+    x4 = 180
+    teacher = current_user.name
+    
+    pdf=FPDF.new
+
+    print_students = @matrix.select { |student_assignment| @checked_students[student_assignment[0].id.to_s] == '1' }
+
+    print_students.each do |student_assignments|
+      pdf.AddPage
+      pdf.SetFont('Arial','B',10)
+      pdf.SetX((190-"Unfinished Assignment Report".size)/2)
+      pdf.Cell(40,10,"Unfinished Assignment Report")
+      pdf.Ln(5)
+      pdf.SetFont('Arial','B',10)
+      pdf.Cell(40,10,"Student: #{student_assignments[0].name}")
+      pdf.Ln(3)
+      pdf.SetFont('Arial','',8)
+      pdf.Cell(40,10,"Teacher: #{teacher}")
+      pdf.Ln(3)
+      pdf.Cell(40,10,"Class: #{@student_class.name}")
+      pdf.Ln(10)
+      pdf.SetFont('Arial','B',8)
+      pdf.Cell(5,10,"Assignment")
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Due Date")
+      pdf.SetFont('Arial','',8)
+      student_assignments[1].each do |assignment|
+        pdf.Ln(5)
+        pdf.Cell(5,10,assignment.name)
+        pdf.SetX(x1)
+        if(assignment.due_date.nil?)
+          pdf.Cell(5,10,"No Due Date")
+        else
+          pdf.Cell(5,10,assignment.due_date.strftime("%m/%d/%Y"))
+        end
+      end
+      
+      
+    end
+    pdf.Output
+  end
+  
+  def gen_pdf_assignment_report
+    x1 = 120
+    x2 = 140
+    x3 = 160
+    x4 = 180
+    teacher = current_user.name
+    school = current_user.teacher.school.name
+    pdf=FPDF.new
+    @show_students.each do |student|
+      pdf.AddPage
+      pdf.SetFont('Arial','B',10)
+      pdf.SetX((190-"Assignment report".size)/2)
+      pdf.Cell(40,10,"Assignment Report")
+      pdf.Ln(5)
+      pdf.SetFont('Arial','B',10)
+      pdf.Cell(40,10,"Student: #{student.name}")
+      pdf.Ln(3)
+      pdf.SetFont('Arial','',8)
+      pdf.Cell(40,10,"Teacher: #{teacher}")
+      pdf.Ln(3)
+      pdf.Cell(5,10,"To Parent or Guardian: For more details, log in to your student's account at www.assistment.org.")
+      pdf.Ln(3)
+      pdf.Cell(5,10,"Login Name: #{student.user.login}.Password: Your student knows the password.")      
+      pdf.Ln(3)
+      pdf.Cell(5,10,"Average: your student's percentage correctness of the assignment ")
+      pdf.Ln(3)
+      pdf.Cell(5,10,"Hint Usage: the number of hints your student uses in the assisgnment")
+      pdf.Ln(3)
+      pdf.Cell(5,10,"Class Average: class's percentage correctness of the assignment ")
+      pdf.Ln(3)
+      pdf.Cell(5,10,"Started a/b: a out of b students that have started the assignment")
+      pdf.Ln(2)
+      pdf.Cell(5,10,"_______________________________")
+      pdf.Ln(4)
+      pdf.SetFont('Arial','B',8)
+      pdf.Cell(5,10,"Assignment")
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Average")
+      pdf.SetX(x2)
+      pdf.Cell(5,10,"Hint Usage")
+      pdf.SetX(x3)
+      pdf.Cell(5,10,"Class Average")
+      pdf.SetX(x4)
+      pdf.Cell(5,10,"Started")
+      pdf.Ln(2)
+      @assignments.each do |assignment|
+        #next if @progresses[student.user_id].nil?
+        #next if @number_of_started[assignment.id] < 4 and @progresses[student.user_id][assignment.id].nil?
+        pdf.Cell(5,10,"______________________________________________________________________________________________________________________")
+        pdf.Ln(1)
+        pdf.Ln(2)
+        pdf.SetFont('Arial','',8)
+        unless assignment.name.length > 80
+          pdf.Cell(5,10,assignment.name)
+        else
+          pdf.Cell(5,10,assignment.name.slice(0,80)+"...")
+        end
+        pdf.SetX(x1)
+        pdf.Cell(5,10,(get_student_assignment_average_print student, assignment))
+        pdf.SetX(x2)
+        pdf.Cell(5,10,(get_student_hint_usage_print student, assignment))
+        pdf.SetX(x3)
+        pdf.Cell(5,10,@class_average[assignment.id]['average'].to_s+"%") unless @class_average[assignment.id]['average'].nil?
+        pdf.SetX(x4)
+        pdf.Cell(5,10,@number_of_started[assignment.id].to_s + "/" +@students.size.to_s)
+        pdf.Ln(0.5)      
+      end
+    end
+    pdf.Output
+  end
+  
+  def gen_pdf_individual_report
+    x1 = 95
+    x2 = 120
+    x3 = 135
+    x4 = 160
+    teacher = current_user.name
+    school = current_user.teacher.school.name
+    pdf=FPDF.new
+	pdf.AddPage
+    pdf.SetFont('Arial','B',10)
+    pdf.SetX((190-"Individual report".size)/2)
+    pdf.Cell(40,10,"Individual Report")
+    pdf.Ln(5)
+    pdf.SetFont('Arial','B',10)
+    pdf.Cell(40,10,"Student: #{@student_user.name}")
+    pdf.Ln(3)
+    pdf.SetFont('Arial','',8)
+    pdf.Cell(40,10,"Teacher: #{teacher}")
+    pdf.Ln(3)
+    pdf.Cell(5,10,"_______________________________")
+    pdf.Ln(4)
+    pdf.SetFont('Arial','B',8)
+    pdf.Cell(5,10,"Assignment")
+    pdf.SetX(x1-3)
+    pdf.Cell(5,10,"Completion Status")
+    pdf.SetX(x2)
+    pdf.Cell(5,10,"Grade")
+    pdf.SetX(x3)
+    pdf.Cell(5,10,"Last Worked On")
+    pdf.SetX(x4)
+    pdf.Cell(5,10,"Type of Assignment")
+    pdf.Ln(0.5)
+    @assignments.each do |assignment|
+		current_hash = @student_info[assignment.id]
+        #next if @progresses[student.user_id].nil?
+        #next if @number_of_started[assignment.id] < 4 and @progresses[student.user_id][assignment.id].nil?
+        pdf.Cell(5,10,"______________________________________________________________________________________________________________________")
+        pdf.Ln(4)
+        pdf.SetFont('Arial','',8)
+		if assignment.position == 0 
+			name = assignment.name(:short => true)
+		else 
+			name = assignment.name
+		end 
+        unless name.length > 60
+          pdf.Cell(5,10,name)
+        else
+          pdf.Cell(5,10,name.slice(0,60)+"...")
+        end
+		if current_hash["status"] == "correct"
+			status = "Complete"
+		elsif current_hash["status"] == "in_progress"
+			status = "In Progress"
+		else
+			status = "Not Started"
+		end
+        pdf.SetX(x1)
+        pdf.Cell(5,10, status)
+        pdf.SetX(x2)
+        pdf.Cell(5,10, "#{current_hash["correct"] || 0}/#{current_hash["done"] || 0} - #{current_hash["percent"] || "0%"}")
+        pdf.SetX(x3 + 5)
+        pdf.Cell(5,10, current_hash["last_worked_on"])
+        pdf.SetX(x4)
+        pdf.Cell(5,10,current_hash["type_of_assignment"])
+        pdf.Ln(0.5)      
+    end
+    pdf.Output
+  end
+	
+  def gen_pdf_class_summary
+    x1 = 20
+    x2 = 50
+    x3 = 60
+    teacher = current_user.name
+    school = current_user.teacher.school.name
+    pdf=FPDF.new
+    @students.each do |student|
+      pdf.AddPage
+      pdf.SetFont('Arial','B',14)
+      pdf.SetX((190-"Summary report".size)/2)
+      pdf.Cell(40,10,"Summary Report")
+      pdf.Ln(10)
+      pdf.SetFont('Arial','B',10)
+      pdf.Cell(40,10,"#{school}")
+      pdf.Ln(5)
+      pdf.SetFont('Arial','',8)
+      pdf.Cell(40,10,"Teacher: #{teacher}")
+      pdf.Ln(5)
+      pdf.Cell(5,10,"Student: #{student.name}")
+      pdf.Ln(2)
+      pdf.Cell(5,10,"_______________________________")
+      pdf.Ln(10)
+      # Main questions
+      pdf.SetFont('Arial','B',8)
+      pdf.Cell(5,10,"Main questions:")
+      pdf.Ln(5)
+      pdf.SetFont('Arial','',8)
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Total done:")
+      pdf.SetX(x2)
+      pdf.Cell(5,10,"#{@student_data[student.user.id]['original_done'] unless @student_data[student.user.id].nil?}")
+      pdf.Ln(5)
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Total correct:")
+      pdf.SetX(x2)
+      pdf.Cell(5,10,"#{@student_data[student.user.id]['original_correct'] unless @student_data[student.user.id].nil?}")
+      pdf.Ln(5)
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Average:")
+      pdf.SetX(x2)
+      pdf.Cell(5,10,"#{@student_data[student.user.id]['average'].to_i unless @student_data[student.user.id].nil?}")
+      pdf.Cell(5,10,"#{'%' unless @student_data[student.user.id].nil?}")
+      pdf.SetX(x3)
+      pdf.Cell(5,10,"Class average: #{@class_average.to_i} %")
+      pdf.Ln(5)
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Predict MCAS score:")
+      pdf.SetX(x2)
+      pdf.Cell(5,10,"#{@student_data[student.user.id]['mcas'] unless @student_data[student.user.id].nil?}")
+      pdf.SetX(x3)
+      pdf.Cell(5,10,"Class average: #{@class_mcas.to_i}")
+      pdf.Ln(5)
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Performance level:")
+      pdf.SetX(x2)
+      pdf.Cell(5,10,"#{@student_data[student.user.id]['perf'] unless @student_data[student.user.id].nil?}")
+      pdf.Ln(5)
+      # All questions
+      pdf.SetFont('Arial','B',8)
+      pdf.Ln(5)
+      pdf.Cell(5,10,"All questions (main + supporting questions):")
+      pdf.Ln(5)
+      pdf.SetFont('Arial','',8)
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Total done:")
+      pdf.SetX(x2)
+      pdf.Cell(5,10,"#{@student_data[student.user.id]['total_done'] unless @student_data[student.user.id].nil?}")
+      pdf.Ln(5)
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Total correct:")
+      pdf.SetX(x2)
+      pdf.Cell(5,10,"#{@student_data[student.user.id]['total_correct'] unless @student_data[student.user.id].nil?}")
+      pdf.Ln(5)
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Average:")
+      pdf.SetX(x2)
+      pdf.Cell(5,10,"#{@student_data[student.user.id]['average_all'].to_i unless @student_data[student.user.id].nil?}")
+      pdf.Cell(5,10,"#{'%' unless @student_data[student.user.id].nil?}")
+      pdf.SetX(x3)
+      pdf.Cell(5,10,"Class average: #{@class_average_all.to_i} %")
+      pdf.Ln(5)
+      pdf.SetX(x1)
+      pdf.Cell(5,10,"Request helps:")
+      pdf.SetX(x2)
+      hint = @student_data[student.user.id]['total_hints'] unless @student_data[student.user.id].nil?
+      pdf.Cell(5,10,"#{hint}")
+      pdf.SetX(x3)
+      pdf.Cell(5,10,"Class average: #{@hint_average.to_i}")
+      pdf.Ln(5)
+    end
+    pdf.Output
+  end
+	
+  def get_mcas_score total_done, total_correct
+    return 0 if total_done <10
+    score = total_correct.to_f * RANGE / total_done
+    return score < DOWNLIMIT ? BASESCORE : (COEFF.to_f * score + INTERCEPT).to_i
+  end
+
+  def get_student_level score
+    return "NA" if score == 0
+    return WARN_LOW if score < FAIL_LOW
+    return WARN_HIGH if score < FAIL_HIGH
+    return NI_LOW if score < NEEDSIMPROVEMENT_LOW
+    return NI_HIGH if score < NEEDSIMPROVEMENT_HIGH
+    return PRO
+  end
+    
+  def get_main_problem_with_scaffolds(assistment_id)
+    assistment = TutorHelper.get_assistment(assistment_id)
+    assistment[:problems].each do |problem|
+      @main_problems[problem[:id]] = Array.new
+      @main_problems[problem[:id]] << problem[:id]
+      get_scaffolds(problem[:id], problem)
+    end
+    nil
+  end
+   
+   def get_main_problem_without_scaffolds(assistment_id)
+    assistment = TutorHelper.get_assistment(assistment_id)
+    assistment[:problems].each do |problem|
+      @main_problems[problem[:id]] = Array.new
+      @main_problems[problem[:id]] << problem[:id]
+    end
+    nil
+  end 
+   
+  def get_scaffolds(main_problem_id, problem)
+    problem[:tutor_strategies].each_value do |tutor_strategy|
+      tutor_strategy[:scaffolds].each do |problem|
+        @main_problems[main_problem_id] << problem[:id]
+        get_scaffolds(main_problem_id, problem)
+      end if tutor_strategy[:is_scaffolding]
+    end
+    nil
+  end
+   
+  def generate_pattern size
+    arr = Array.new
+    if size == 1
+      arr <<[0]
+      arr <<[1]
+    else
+      generate_pattern(size-1).each do |a|
+        b = a.dup
+        arr << (a.insert 0, 0)
+        arr << (b.insert 0, 1)
+      end
+    end
+    return arr
+  end
+
+  def create_sequence_by_asID(assistments, title)
+    sequence = Sequence.create_from_hash({
+        'name'        => title,
+        'assistments' => assistments,
+      })
+    sequence.base_section.type ='LinearSection'
+    sequence.content_creators << current_user.content_creator
+    sequence.base_section.save
+    @seq_id = sequence.id
+  end
+  
+  # This is for data driven instruction
+  def data_driven_problem
+	
+  end
+  
+  def data_driven_assignment
+  
+  end
+end
